@@ -1,0 +1,493 @@
+/* Local music panel: search half.
+   Structure and typography are copied from the archive index modal — the same
+   .search-field, .category-filters, .result-header, .result-row, .empty-results
+   and .modal-bottom read as one interface. Only music specific pieces are
+   declared here; colours follow the shared theme variables and the dark-surface
+   rules in theme.css. */
+
+/* The music modal is a flex column so the panel takes exactly the space left by
+   the heading, and the player bar stays inside the card. */
+.music-modal {
+  display: flex;
+  flex-direction: column;
+}
+
+.music-panel {
+  display: grid;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  margin-top: 6px;
+  /* The modal bottom is absolutely positioned by the shared shell. */
+  padding-bottom: 34px;
+  color: var(--theme-ink, #080a08);
+}
+
+.music-panel .search-field {
+  margin-top: 12px;
+}
+
+/* Category filters carry the retrieval scope; the directory actions sit at the
+   far end of the same row so the modal keeps a single control line. */
+.music-filters {
+  align-items: center;
+}
+
+.music-tools {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 27px;
+}
+
+.music-tools button {
+  color: var(--theme-muted, #8c8373);
+}
+
+.music-tools button:hover:not([disabled]) {
+  color: var(--theme-accent, #9b7247);
+}
+
+.music-tools button[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* One muted line: directory, size and scan progress, no chrome. */
+.music-status {
+  padding: 0 0 12px;
+  font-size: 10.5px;
+  letter-spacing: 0.5px;
+  color: var(--theme-muted, #77756d);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.music-status > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Two narrow trailing columns instead of the archive's department/access pair. */
+.music-panel .result-header,
+.music-panel .result-row {
+  grid-template-columns: minmax(0, 1fr) 118px 132px;
+}
+
+/* The archive index fixes its list height; the music panel fills the grid. */
+.music-panel .search-results {
+  height: auto;
+  min-height: 0;
+}
+
+.music-panel .result-row.cursor {
+  background: color-mix(in srgb, var(--theme-ink, #080a08) 8%, transparent);
+}
+
+.music-panel .result-row.playing {
+  color: var(--theme-accent, #9b7247);
+}
+
+.music-panel .result-row.playing .result-name small {
+  color: var(--theme-accent, #9b7247);
+}
+
+.music-panel .result-row.missing {
+  opacity: 0.55;
+}
+
+.music-panel .result-row mark {
+  background: color-mix(in srgb, var(--theme-accent, #9b7247) 26%, transparent);
+  color: inherit;
+  padding: 0 1px;
+}
+
+.music-panel .result-row > span:last-child > i:empty {
+  visibility: hidden;
+}
+
+/* ------------------------------------------------------------------ player */
+
+.music-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) auto minmax(0, 1.1fr) auto;
+  align-items: center;
+  gap: 18px;
+}
+
+.music-now {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.music-cover {
+  flex: 0 0 46px;
+  width: 46px;
+  height: 46px;
+  border: 1px solid var(--theme-line, #aaa59a);
+  background-size: cover;
+  background-position: center;
+  display: grid;
+  place-content: center;
+  font-size: 15px;
+  color: var(--theme-muted, #77756d);
+}
+
+.music-cover.has-cover span {
+  display: none;
+}
+
+.music-now-text {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.music-now-text strong {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-now-text span {
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  color: var(--theme-muted, #77756d);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.music-controls button {
+  min-width: 40px;
+  min-height: 40px;
+  border: 1px solid var(--theme-line, #aaa59a);
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
+}
+
+.music-controls button:hover {
+  border-color: var(--theme-accent, #9b7247);
+  color: var(--theme-accent, #9b7247);
+}
+
+.music-controls .music-play {
+  min-width: 52px;
+}
+
+.music-bar[data-state="playing"] .music-play {
+  background: var(--theme-ink, #080a08);
+  color: var(--theme-paper, #eae5e1);
+  border-color: var(--theme-ink, #080a08);
+}
+
+.music-bar[data-state="error"] .music-now-text span {
+  color: #a4552f;
+}
+
+.music-controls .music-mode {
+  min-width: 92px;
+  font-size: 10px;
+}
+
+.music-timeline {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--theme-muted, #77756d);
+}
+
+.music-timeline #music-position {
+  text-align: right;
+}
+
+.music-seek {
+  position: relative;
+  height: 26px;
+  cursor: pointer;
+  outline: none;
+}
+
+.music-seek::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: var(--theme-line, #aaa59a);
+}
+
+.music-seek i {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 2px;
+  width: var(--music-progress, 0%);
+  background: var(--theme-accent, #9b7247);
+  transition: width 0.12s linear;
+}
+
+.music-seek::after {
+  content: "";
+  position: absolute;
+  left: var(--music-progress, 0%);
+  top: 50%;
+  width: 9px;
+  height: 9px;
+  margin: -4.5px 0 0 -4.5px;
+  border-radius: 50%;
+  background: var(--theme-accent, #9b7247);
+  opacity: 0;
+  transition: opacity 0.16s ease;
+}
+
+.music-seek:hover::after,
+.music-seek:focus-visible::after {
+  opacity: 1;
+}
+
+.music-seek:focus-visible {
+  box-shadow: 0 0 0 1px var(--theme-accent, #9b7247);
+}
+
+.music-volume {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--theme-muted, #77756d);
+}
+
+.music-volume input[type="range"] {
+  width: 108px;
+  accent-color: var(--theme-accent, #9b7247);
+}
+
+/* ------------------------------------------------------- settings block */
+
+.music-settings {
+  display: grid;
+  gap: 18px;
+  border-top: 1px solid var(--theme-line, #aaa59a);
+  border-bottom: 1px solid var(--theme-line, #aaa59a);
+  padding: 18px 0;
+  margin: 18px 0;
+}
+
+.music-settings-item {
+  display: grid;
+  gap: 8px;
+}
+
+.music-settings-item > strong {
+  font-size: 11px;
+  letter-spacing: 1.6px;
+}
+
+.music-settings-item > span {
+  font-size: 11px;
+  color: var(--theme-muted, #77756d);
+}
+
+.music-settings-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 10.5px;
+  color: var(--theme-muted, #77756d);
+}
+
+.music-settings-stats > span {
+  border: 1px solid var(--theme-line, #aaa59a);
+  padding: 2px 8px;
+}
+
+.music-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.music-settings-actions button,
+.music-settings-rhythm button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--theme-line, #aaa59a);
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
+}
+
+.music-settings-actions button:hover:not([disabled]),
+.music-settings-rhythm button:hover {
+  color: var(--theme-accent, #9b7247);
+  border-color: var(--theme-accent, #9b7247);
+}
+
+.music-settings-actions button[disabled] {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.music-settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--theme-muted, #77756d);
+}
+
+.music-settings-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.music-settings-rhythm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.music-settings-rhythm button[aria-pressed="true"] {
+  background: var(--theme-ink, #080a08);
+  border-color: var(--theme-ink, #080a08);
+  color: var(--theme-paper, #eae5e1);
+}
+
+.settings-list .music-settings-range {
+  display: flex;
+  align-items: center;
+  justify-content: initial;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  cursor: default;
+  font-size: 11px;
+  color: var(--theme-muted, #77756d);
+}
+
+.settings-list .music-settings-range > span {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.music-settings-range input[type="range"] {
+  position: static;
+  width: 100%;
+  min-width: 80px;
+  height: 22px;
+  opacity: 1;
+  accent-color: var(--theme-accent, #9b7247);
+  cursor: pointer;
+}
+
+.music-settings-range output {
+  min-width: 42px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.music-bridge-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.music-bridge-fields label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--theme-muted, #77756d);
+}
+
+.music-bridge-fields input {
+  min-height: 30px;
+  min-width: 150px;
+  padding: 0 8px;
+  border: 1px solid var(--theme-line, #aaa59a);
+  background: var(--theme-field, #e7e3d9);
+  color: var(--theme-ink, #080a08);
+  font: inherit;
+  font-size: 11px;
+}
+
+.music-bridge-status {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--theme-muted, #77756d);
+  word-break: break-all;
+}
+
+.music-bridge-status.ok {
+  color: var(--theme-accent, #9b7247);
+}
+
+.music-settings-note {
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: var(--theme-muted, #77756d);
+  margin: 0;
+}
+
+.system-nav button.playing {
+  color: var(--theme-accent, #9b7247);
+}
+
+/* Dark surface refinements that the shared theme rules do not cover. */
+[data-dark-surface="true"] .music-bar[data-state="error"] .music-now-text span {
+  color: #d98b62;
+}
+
+[data-dark-surface="true"] .music-panel .result-row.playing,
+[data-dark-surface="true"] .music-panel .result-row.playing .result-name small {
+  color: var(--theme-accent, #c5a16b);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .music-panel .result-row,
+  .music-tools button,
+  .music-controls button,
+  .music-seek i,
+  .music-seek::after,
+  .music-filters button {
+    transition: none;
+  }
+}
+
+/* Short viewports: tighten the search block so the list keeps its room. */
+@media (max-height: 820px) {
+  .music-panel .search-field {
+    margin-top: 4px;
+  }
+
+  .music-filters {
+    padding: 16px 0 14px;
+  }
+}

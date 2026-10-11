@@ -74,7 +74,9 @@ export type MusicBridgeOptions = {
 };
 
 const CONNECT_TIMEOUT = 6000;
-const POLL_TIMEOUT = 4000;
+// The bridge allows an individual VLC HTTP response up to eight seconds.
+const POLL_TIMEOUT = 10000;
+const COMMAND_TIMEOUT = 30000;
 /** A busy page can delay a fetch's resolution; retry instead of giving up. */
 const PROBE_ATTEMPTS = 3;
 const RECONNECT_DELAY = 500;
@@ -107,6 +109,8 @@ export class MusicBridge {
   private naturalEndAllowed = false;
   private transportBusy = false;
   private playbackTimer: ReturnType<typeof setInterval> | null = null;
+  private pollTask: Promise<BridgeStatus | null> | null = null;
+  private outputMayRemain = false;
 
   constructor(options: MusicBridgeOptions) {
     this.options = options;
@@ -134,6 +138,9 @@ export class MusicBridge {
   get error() {
     return this.lastError;
   }
+
+  /** A lost response/connection cannot prove the native output has stopped. */
+  get needsStop() { return this.outputMayRemain; }
 
   private get base() {
     return `http://127.0.0.1:${this.options.port}`;
@@ -171,10 +178,14 @@ export class MusicBridge {
       throw new Error("桥接请求已失效");
     if (response.status === 401 && disconnectOnFailure)
       this.connectionLost(generation, "令牌不匹配，请更新桥接设置");
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = (await response.json()) as T;
     if (generation !== this.generation || this.disposed)
       throw new Error("桥接请求已失效");
+    if (!response.ok) {
+      const detail = payload && typeof payload === "object" && "error" in payload
+        ? String(payload.error) : "";
+      throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+    }
     return payload;
   }
 
@@ -333,6 +344,7 @@ export class MusicBridge {
     this.reconnectTimer = null;
     this.streamTimer = null;
     this.playbackTimer = null;
+    this.pollTask = null;
   }
 
   private current(generation: number) {
@@ -422,9 +434,9 @@ export class MusicBridge {
         }, 2500);
         finish(true);
         this.options.onConnectionChange?.(true, health);
-        this.playbackTimer = setInterval(() => void this.status(), 750);
+        this.playbackTimer = setInterval(() => void this.pollStatus(), 750);
         // Restore actual VLC playback/BGM state immediately after reconnecting.
-        void this.status();
+        void this.pollStatus();
       };
       source.onmessage = (event) => {
         if (
@@ -493,8 +505,40 @@ export class MusicBridge {
     return payload.scan ?? null;
   }
 
+  /** Timer and scene polling share one request and leave transport work alone. */
+  pollStatus(): Promise<BridgeStatus | null> {
+    if (!this.connected || this.transportBusy) return Promise.resolve(null);
+    if (this.pollTask) return this.pollTask;
+    const task = this.status().finally(() => {
+      if (this.pollTask === task) this.pollTask = null;
+    });
+    this.pollTask = task;
+    return task;
+  }
+
+  private acceptStatus(status: BridgeStatus, generation: number, sequence: number, transport: number): BridgeStatus | null {
+    if (!this.current(generation) || transport !== this.transportSequence || sequence < this.deliveredStatus)
+      return null;
+    if (status.state === "offline") {
+      this.connectionLost(generation, "VLC 暂时离线，正在重连");
+      return null;
+    }
+    this.deliveredStatus = sequence;
+    if (status.currentId !== null || status.state === "playing" || status.state === "paused") this.outputMayRemain = true;
+    this.options.onState?.(status);
+    if (status.state === "playing" && !status.loading && !status.prepared && !this.preparedTrack && !this.transportBusy) {
+      this.intentId = status.currentId;
+      this.naturalEndAllowed = true;
+    }
+    if (status.ended && this.naturalEndAllowed && status.currentId === this.intentId) {
+      this.naturalEndAllowed = false;
+      void this.advance(1, true).catch(() => {});
+    }
+    return status;
+  }
+
   async status(): Promise<BridgeStatus | null> {
-    if (!this.connected) return null;
+    if (!this.connected || this.transportBusy) return null;
     const generation = this.generation;
     const sequence = ++this.statusSequence;
     const transport = this.transportSequence;
@@ -505,27 +549,11 @@ export class MusicBridge {
         generation,
         false,
       );
-      if (!this.current(generation) || transport !== this.transportSequence || sequence < this.deliveredStatus)
-        return null;
-      if (status.state === "offline") {
-        this.connectionLost(generation, "VLC 暂时离线，正在重连");
-        return null;
-      }
-      this.deliveredStatus = sequence;
-      this.options.onState?.(status);
-      if (status.state === "playing" && !status.loading && !status.prepared && !this.preparedTrack && !this.transportBusy) {
-        this.intentId = status.currentId;
-        this.naturalEndAllowed = true;
-      }
-      if (status.ended && this.naturalEndAllowed && status.currentId === this.intentId) {
-        this.naturalEndAllowed = false;
-        void this.advance(1, true).catch(() => {});
-      }
-      return status;
+      return this.acceptStatus(status, generation, sequence, transport);
     } catch {
       // A newer successful poll is authoritative, including when an older
       // request subsequently times out or returns an HTTP/authentication error.
-      if (transport === this.transportSequence && sequence >= this.deliveredStatus)
+      if (transport === this.transportSequence && sequence >= this.deliveredStatus && !this.transportBusy)
         this.connectionLost(generation, "无法读取 VLC 状态，正在重连");
       return null;
     }
@@ -533,15 +561,26 @@ export class MusicBridge {
 
   private async command(
     path: string,
-    timeout = POLL_TIMEOUT,
+    timeout = COMMAND_TIMEOUT,
     invalidate = true,
   ): Promise<BridgeStatus | null> {
     if (!this.connected) throw new Error(this.lastError || "VLC 桥接未连接");
     const generation = this.generation;
     const sequence = invalidate ? this.beginTransport() : this.transportSequence;
+    // A transport acknowledgement is authoritative at completion. Slider/seek
+    // snapshots keep their send order, so an older one cannot undo that ack.
+    const statusSequence = invalidate ? null : ++this.statusSequence;
+    if (/^\/api\/(start|resume)(?:\?|$)/.test(path)) this.outputMayRemain = true;
     try {
-      await this.request(this.transportPath(path, sequence), timeout, generation, false, invalidate ? this.transportAbort.signal : undefined);
-      return this.current(generation) && sequence === this.transportSequence ? this.status() : null;
+      const result = await this.request<BridgeStatus | { status: BridgeStatus }>(this.transportPath(path, sequence), timeout, generation, false, invalidate ? this.transportAbort.signal : undefined);
+      if (!this.current(generation) || sequence !== this.transportSequence) return null;
+      const status = "status" in result ? result.status : result;
+      if (!status || !["playing", "paused", "stopped", "offline"].includes(status.state) ||
+        !(status.currentId === null || typeof status.currentId === "string")) throw new Error("VLC 播放操作缺少状态回执");
+      const accepted = this.acceptStatus(status, generation, statusSequence ?? ++this.statusSequence, sequence);
+      if (accepted && /^\/api\/stop(?:\?|$)/.test(path) && accepted.state === "stopped" && accepted.currentId === null)
+        this.outputMayRemain = false;
+      return accepted;
     } catch (error) {
       if (generation !== this.generation || sequence !== this.transportSequence) return null;
       if (!(error instanceof Error && /HTTP (400|409)/.test(error.message))) this.connectionLost(generation, "VLC 播放操作失败，正在重连");
@@ -575,6 +614,7 @@ export class MusicBridge {
     const generation = this.generation;
     const sequence = this.beginTransport();
     this.intentId = id;
+    this.outputMayRemain = true;
     try {
       const ready = await this.request<{ ready: boolean; ticket: string }>(
         this.transportPath(`/api/prepare?id=${encodeURIComponent(id)}&position=${options.position ?? 0}`, sequence),
@@ -584,8 +624,9 @@ export class MusicBridge {
       if (!ready.ready || !ready.ticket) throw new Error("VLC 未完成音频准备");
       this.preparedTrack = { id, ticket: ready.ticket };
       this.lastError = "";
-      await this.status();
-      return this.current(generation) && sequence === this.transportSequence && this.preparedTrack !== null;
+      // The authenticated prepare response is the readiness acknowledgement.
+      // A separate short status poll must not discard this valid start ticket.
+      return true;
     } catch (error) {
       if (this.current(generation) && sequence === this.transportSequence) {
         const message = error instanceof Error ? error.message : "VLC 音频准备失败";
@@ -602,19 +643,23 @@ export class MusicBridge {
     }
   }
 
-  async startPrepared(): Promise<boolean> {
+  private async startPreparedStatus(): Promise<BridgeStatus | null> {
     const track = this.preparedTrack;
-    if (!this.connected || !track) return false;
+    if (!this.connected || !track) return null;
     const status = await this.command(`/api/start?ticket=${encodeURIComponent(track.ticket)}`, 20000);
-    if (!status || status.state !== "playing" || status.currentId !== track.id) return false;
+    if (!status || status.state !== "playing" || status.currentId !== track.id) return null;
     this.naturalEndAllowed = true;
-    return true;
+    return status;
+  }
+
+  async startPrepared(): Promise<boolean> {
+    return await this.startPreparedStatus() !== null;
   }
 
   async play(id: string): Promise<BridgeStatus | null> {
     if (!this.connected) throw new Error(this.lastError || "VLC 桥接未连接");
-    if (!await this.prepare(id) || !await this.startPrepared()) return null;
-    return this.status();
+    if (!await this.prepare(id)) return null;
+    return this.startPreparedStatus();
   }
 
   async resume(): Promise<BridgeStatus | null> {
@@ -647,13 +692,13 @@ export class MusicBridge {
   async seek(seconds: number): Promise<BridgeStatus | null> {
     return this.command(
       `/api/seek?seconds=${encodeURIComponent(seconds.toFixed(2))}`,
-      POLL_TIMEOUT, false,
+      COMMAND_TIMEOUT, false,
     );
   }
 
   /** Volume is stored as 0..1 in the app and as 0..512 in VLC. */
   async volume(value: number): Promise<BridgeStatus | null> {
     const scaled = Math.round(Math.max(0, Math.min(1, value)) * 512);
-    return this.command(`/api/volume?value=${scaled}`, POLL_TIMEOUT, false);
+    return this.command(`/api/volume?value=${scaled}`, COMMAND_TIMEOUT, false);
   }
 }

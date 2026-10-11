@@ -343,7 +343,6 @@ musicLibrary.bridgeCoverUrl = (id) => musicBridge.coverUrl(id);
 const bridgeEnvelope = new SpectrumEnvelope();
 let bridgeHealth: BridgeHealth | null = null;
 let bridgeStatus: BridgeStatus | null = null;
-let bridgeHadAudio = false;
 let systemMediaKey = "";
 let systemMediaRequest = 0;
 let bridgeStatusElapsed = 1;
@@ -355,7 +354,6 @@ const musicBridge = new MusicBridge({
   onBands: (samples) => bridgeEnvelope.ingest(samples, performance.now() / 1000),
   onState: (status) => {
     bridgeStatus = status;
-    bridgeHadAudio = status.state === "playing";
     audio.setLocalMusicActive(musicReveal.pending || status.state === "playing" || musicPlayer.state().playing);
     syncMusicIndicators();
   },
@@ -382,7 +380,7 @@ async function refreshBridgeStatus() {
   try {
     // MusicBridge publishes only current-session responses through onState;
     // a delayed or cancelled poll must not repopulate state after disconnect.
-    await musicBridge.status();
+    await musicBridge.pollStatus();
   } finally {
     bridgeStatusBusy = false;
   }
@@ -445,12 +443,12 @@ const engineHandoff = new MusicEngineHandoff({
   stop: async (engine) => {
     if (engine === "browser") { musicPlayer.stop(); return; }
     if (!musicBridge.connected) {
-      if (bridgeHadAudio) throw new Error("无法确认 VLC 已停止，请恢复桥接连接后切换");
-      return;
+      if (!musicBridge.needsStop) return;
+      await musicBridge.connect();
+      if (!musicBridge.connected) throw new Error("无法确认 VLC 已停止，请恢复桥接连接后切换");
     }
     const state = await musicBridge.stop();
-    if (!state || state.state === "playing") throw new Error("VLC 未能停止，本次内核切换已取消");
-    bridgeHadAudio = false;
+    if (!state || state.state !== "stopped" || state.currentId !== null) throw new Error("VLC 未能停止，本次内核切换已取消");
   },
   apply: async (engine, current) => {
     prefs.musicEngine = engine;
@@ -481,11 +479,11 @@ async function disconnectMusicBridge() {
   musicPanel.cancelPending();
   if (musicBridge.connected) {
     const state = await musicBridge.stop().catch(() => null);
-    if (!state || state.state === "playing") {
+    if (!state || state.state !== "stopped" || state.currentId !== null) {
       notify("无法确认 VLC 已停止，请恢复连接后重试断开");
       return;
     }
-  } else if (bridgeHadAudio) {
+  } else if (musicBridge.needsStop) {
     notify("VLC 连接已中断，恢复连接后才能确认播放已停止");
     return;
   }

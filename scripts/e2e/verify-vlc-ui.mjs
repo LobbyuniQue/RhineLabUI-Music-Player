@@ -168,6 +168,8 @@ const edge = spawn(
   { stdio: "ignore", windowsHide: true },
 );
 
+let cdp;
+let handoffStage = "not started";
 try {
   let health = null;
   for (let i = 0; i < 60; i++) {
@@ -190,7 +192,7 @@ try {
     socket.addEventListener("open", resolve);
     socket.addEventListener("error", reject);
   });
-  const cdp = new Cdp(socket);
+  cdp = new Cdp(socket);
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");
 
@@ -210,6 +212,29 @@ try {
       if (ready) return true;
     }
     return false;
+  };
+
+  const closeModal = async () => {
+    await cdp.evaluate(`window.rhine.music.close()`, false, 20000);
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      const closed = await cdp.evaluate(
+        `!document.querySelector('#modal-root [role="dialog"]')`,
+        false,
+        20000,
+      );
+      if (closed) return;
+      await sleep(300);
+    }
+    throw new Error("Modal closing animation did not remove its dialog");
+  };
+  const nativeStatus = async () => {
+    const response = await fetch(`http://127.0.0.1:${PORT}/api/status`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error(`VLC status HTTP ${response.status}`);
+    return response.json();
   };
 
   check("页面就绪", await load());
@@ -374,8 +399,7 @@ try {
 
   // 2.3: ACCESS FILE from a music archive must route the selected real bridge id
   // to VLC, not the synthetic M-### archive display id.
-  await cdp.evaluate(`window.rhine.music.close()`, false, 20000);
-  await sleep(500);
+  await closeModal();
   await cdp.evaluate(
     `document.querySelector('[data-action="library-mode"]').click()`,
     false,
@@ -436,24 +460,31 @@ try {
     20000,
   );
   let archiveStatus = null;
-  // Full-motion software rendering can run at 1 fps. The animation advances
-  // by bounded frame deltas, so wait for its real end instead of assuming 35 s.
-  for (let i = 0; i < 120; i++) {
+  let archiveProgress = null;
+  // Preparation, the complete reveal, and start each retain their real checks.
+  // Use a total deadline, and preserve the first error instead of cascading
+  // through the remaining controls after an unsuccessful preparation.
+  const archiveDeadline = Date.now() + 180000;
+  let nextArchiveLog = 0;
+  while (Date.now() < archiveDeadline) {
     await sleep(1000);
-    archiveStatus = await (
-      await fetch(`http://127.0.0.1:${PORT}/api/status`, {
-        headers: { authorization: `Bearer ${TOKEN}` },
-      })
-    ).json();
-    if (i % 10 === 0) {
-      const progress = await cdp.evaluate(`({access:window.rhine.music.access().phase,
-        decryption:window.rhine.stats().decryption?.phase,frames:window.rhine.stats().renderedFrames,
-        hidden:document.hidden})`,false,20000);
-      console.log("archive animation:",JSON.stringify(progress));
+    archiveStatus = await nativeStatus();
+    archiveProgress = await cdp.evaluate(`(() => {
+      const access=window.rhine.music.access(), bridge=window.rhine.music.bridge(), stats=window.rhine.stats();
+      return {access:access.phase,error:access.error,connected:bridge.connected,bridgeError:bridge.error,
+        decryption:stats.decryption?.phase,decryptionTime:stats.decryption?.time,
+        fps:stats.fps,frames:stats.renderedFrames,reusedFrames:stats.reusedFrames,
+        masks:document.querySelectorAll('#detail-content .document-redaction-window').length,hidden:document.hidden};
+    })()`,false,20000);
+    if (Date.now() >= nextArchiveLog || archiveProgress.access === "error") {
+      console.log("archive animation:",JSON.stringify(archiveProgress));
+      nextArchiveLog = Date.now() + 10000;
     }
+    if (archiveProgress.access === "error") break;
     if (
       archiveStatus.currentId === archiveTarget.id &&
-      (archiveStatus.state === "playing" || archiveStatus.time > 0.4)
+      (archiveStatus.state === "playing" || archiveStatus.time > 0.4) &&
+      archiveProgress.access === "playing" && !archiveProgress.error
     )
       break;
   }
@@ -466,11 +497,13 @@ try {
     "音乐档案 ACCESS FILE 通过真实曲目 ID 播放 VLC",
     archiveStatus?.currentId === archiveTarget.id &&
       (archiveStatus?.state === "playing" || archiveStatus?.time > 0.4) &&
+      archiveProgress?.access === "playing" && !archiveProgress?.error &&
       openedArchiveTitle === archiveTarget.title,
     JSON.stringify({
       archiveTarget,
       beforeArchive,
       archiveStatus,
+      archiveProgress,
       openedArchiveTitle,
     }),
   );
@@ -478,6 +511,8 @@ try {
   check("完整揭示动画结束帧发送 VLC 起播请求", vlcStartFrames.length===1 && vlcStartFrames[0].masks===0 &&
     vlcStartFrames[0].access.phase==="starting" && vlcStartFrames[0].access.startFrame>0 &&
     vlcStartFrames[0].motion.preset==="full", JSON.stringify(vlcStartFrames));
+  if (results.some((result) => !result.ok))
+    throw new Error(`VLC archive playback failed: ${JSON.stringify({ archiveStatus, archiveProgress })}`);
 
   // Informational: issue another direct play and report what VLC does while the headless
   // page keeps rendering (this environment can starve VLC; bridge-only tests remain authoritative).
@@ -512,17 +547,9 @@ try {
     Buffer.from(playingShot.data, "base64"),
   );
 
-  await cdp.evaluate(
-    `(async () => {
-    window.rhine.music.close();
-    await new Promise(r => setTimeout(r, 600));
-    document.querySelector('[data-action="settings"]').click();
-    await new Promise(r => setTimeout(r, 900));
-    return true;
-  })()`,
-    true,
-    40000,
-  );
+  await closeModal();
+  await cdp.evaluate(`document.querySelector('[data-action="settings"]').click()`,false,20000);
+  await sleep(900);
   const settings = await cdp.evaluate(
     `(() => {
     const block = document.querySelector("[data-music-settings]");
@@ -674,11 +701,8 @@ try {
     JSON.stringify(reconnected),
   );
 
-  await cdp.evaluate(
-    `(async () => { window.rhine.music.close(); await new Promise(resolve => setTimeout(resolve, 600)); window.rhine.music.open(); })()`,
-    true,
-    40000,
-  );
+  await closeModal();
+  await cdp.evaluate(`window.rhine.music.open()`,false,20000);
   let restoredPanel = null;
   for (let i = 0; i < 20; i++) {
     await sleep(500);
@@ -702,14 +726,24 @@ try {
     JSON.stringify(restoredPanel),
   );
 
-  const mediaResume = await cdp.evaluate(`(async () => {
-    const m=window.rhine.music;
-    const track=m.library.tracks.find(t=>t.codec==='mp3');
-    await m.bridgePlay(track.id); await m.bridgeSeek(3);
-    await m.mediaAction('pause'); const paused=m.bridge().status;
-    await m.mediaAction('play'); const resumed=m.bridge().status;
-    return {id:track.id,paused,resumed,browser:m.player.state().playing};
-  })()`,true,60000);
+  const mediaTrackId = await cdp.evaluate(
+    `window.rhine.music.library.tracks.find(t=>t.codec==='mp3')?.id`,false,20000);
+  const mediaStarted = await cdp.evaluate(
+    `window.rhine.music.bridgePlay(${JSON.stringify(mediaTrackId)})`,true,60000);
+  if (mediaStarted?.state !== "playing" || mediaStarted.currentId !== mediaTrackId) {
+    const bridge = await cdp.evaluate(`window.rhine.music.bridge()`,false,20000);
+    throw new Error(`Media-key setup did not start VLC: ${JSON.stringify({ mediaStarted, bridge })}`);
+  }
+  const mediaSeek = await cdp.evaluate(`window.rhine.music.bridgeSeek(3)`,true,20000);
+  if (!mediaSeek) throw new Error("Media-key setup did not acknowledge the seek");
+  const paused = await cdp.evaluate(`(async () => {
+    await window.rhine.music.mediaAction('pause'); return window.rhine.music.bridge().status;
+  })()`,true,20000);
+  const resumed = await cdp.evaluate(`(async () => {
+    await window.rhine.music.mediaAction('play'); return window.rhine.music.bridge().status;
+  })()`,true,40000);
+  const browserPlaying = await cdp.evaluate(`window.rhine.music.player.state().playing`,false,20000);
+  const mediaResume = { id: mediaTrackId, paused, resumed, browser: browserPlaying };
   check("系统媒体键路由 VLC，暂停后继续保留进度", mediaResume.paused?.state === "paused" &&
     mediaResume.resumed?.state === "playing" && mediaResume.resumed.currentId === mediaResume.id &&
     mediaResume.resumed.time >= 2 && !mediaResume.browser,JSON.stringify(mediaResume));
@@ -718,16 +752,35 @@ try {
     const m=window.rhine.music; const switched=await m.setEngine('browser');
     return {switched,engine:m.bridge().engine,playing:m.player.state().playing};
   })()`,true,60000);
-  const vlcAfterSwitch=await fetch(`http://127.0.0.1:${PORT}/api/status`,{headers:{authorization:`Bearer ${TOKEN}`}}).then(r=>r.json());
+  const vlcAfterSwitch=await nativeStatus();
   check("VLC 切浏览器前停止旧输出",toBrowser.switched && toBrowser.engine === "browser" &&
     !toBrowser.playing && vlcAfterSwitch.state === "stopped",JSON.stringify({toBrowser,vlcAfterSwitch}));
-  const toVlc=await cdp.evaluate(`(async()=>{
+  if (!toBrowser.switched || toBrowser.engine !== "browser" || vlcAfterSwitch.state !== "stopped")
+    throw new Error(`VLC handoff did not stop the old output: ${JSON.stringify({ toBrowser, vlcAfterSwitch })}`);
+  handoffStage = "indexing browser fixture";
+  console.log("handoff:", handoffStage);
+  const handoffId=await cdp.evaluate(`(async()=>{
     const m=window.rhine.music;
     const bytes=Uint8Array.from(atob(${JSON.stringify(sineWav(12,440,8000).toString('base64'))}),char=>char.charCodeAt(0));
     await m.useFiles([new File([bytes],'handoff.wav',{type:'audio/wav'})]);
-    await m.player.play(m.library.tracks[0]); const before=m.player.state().playing;
+    return m.library.tracks[0]?.id;
+  })()`,true,60000);
+  if (!handoffId) throw new Error("Browser handoff fixture was not indexed");
+  handoffStage = "starting browser fixture";
+  console.log("handoff:", handoffStage);
+  // A fresh user gesture reaches player.prepare before its first await;
+  // indexing the file in an earlier CDP call cannot consume that gesture.
+  const browserStarted=await cdp.evaluate(
+    `window.rhine.music.player.play(window.rhine.music.library.tracks.find(t=>t.id===${JSON.stringify(handoffId)}))`,true,40000);
+  const before=await cdp.evaluate(`window.rhine.music.player.state()`,false,20000);
+  if (!browserStarted || !before.playing)
+    throw new Error(`Browser handoff fixture did not play: ${JSON.stringify(before)}`);
+  handoffStage = "switching back to VLC";
+  console.log("handoff:", handoffStage);
+  const toVlc=await cdp.evaluate(`(async()=>{
+    const m=window.rhine.music;
     const switched=await m.setEngine('vlc');
-    return {before,switched,engine:m.bridge().engine,browser:m.player.state().playing,
+    return {before:${JSON.stringify(before.playing)},switched,engine:m.bridge().engine,browser:m.player.state().playing,
       bridgeTracks:m.library.tracks.filter(t=>t.bridge).length};
   })()`,true,90000);
   check("浏览器切 VLC 前停止旧输出并恢复桥接曲库",toVlc.before && toVlc.switched &&
@@ -741,7 +794,16 @@ try {
     console.log("failed:", failed.map((f) => f.name).join("; "));
   process.exitCode = failed.length ? 1 : 0;
 } catch (error) {
-  console.log("harness error:", error.message);
+  console.log("harness error:", error.message, "handoff:", handoffStage);
+  if (cdp) {
+    const diagnostic = await cdp.evaluate(`(() => {
+      const m=window.rhine.music,b=m.bridge();
+      return {player:m.player.state(),access:m.access(),engine:b.engine,connected:b.connected,error:b.error,
+        bridgeStatus:b.status,tracks:m.library.tracks.map(t=>({id:t.id,name:t.name,bridge:t.bridge})),
+        scene:window.rhine.stats().mode,modal:!!document.querySelector('#modal-root [role="dialog"]')};
+    })()`,false,15000).catch(error => ({ error: error.message }));
+    console.log("page failure state:",JSON.stringify(diagnostic));
+  }
   console.log("bridge log tail:", bridgeLog.split("\n").slice(-6).join("\n"));
   process.exitCode = 1;
 } finally {

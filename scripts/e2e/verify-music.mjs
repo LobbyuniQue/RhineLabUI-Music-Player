@@ -646,11 +646,31 @@ try {
       detailOrder.mode === "detail",
     JSON.stringify({ ...detailOrder, archiveTarget }),
   );
-  const archivePlayback = await cdp.evaluate(
-    `new Promise(resolve => { const started = performance.now(); const poll = () => { const state = window.rhine.music.player.state(); if (state.id === ${JSON.stringify(archiveTarget.id)} && state.playing && !state.loading && state.position > .35) return resolve({ ...state, ok: true }); if (performance.now() - started > 30000) return resolve({ ...state, ok: false }); setTimeout(poll, 200); }; poll(); })`,
-    true,
-    40000,
-  );
+  let archivePlayback = null;
+  const archiveWaitStarted = Date.now();
+  let lastAnimationLog = -10000;
+  // The full animation uses bounded frame deltas. Software rendering can take
+  // longer than 30 wall-clock seconds; keep the same 120 s budget as VLC UI.
+  while (Date.now() - archiveWaitStarted < 120000) {
+    await sleep(500);
+    archivePlayback = await cdp.evaluate(
+      `(() => { const state = window.rhine.music.player.state(); const access = window.rhine.music.access(); const stats = window.rhine.stats(); return {
+        ...state, ok:state.id === ${JSON.stringify(archiveTarget.id)} && state.playing && !state.loading && state.position > .35,
+        accessPhase:access.phase, decryptionPhase:stats.decryption?.phase, decryptionTime:stats.decryption?.time,
+        sceneMode:stats.mode, fps:stats.fps, frames:stats.renderedFrames, reusedFrames:stats.reusedFrames,
+        modal:Boolean(document.querySelector('#modal-root [role="dialog"]')),
+        masks:document.querySelectorAll('#detail-content .document-redaction-window').length, hidden:document.hidden
+      }; })()`,
+      false,
+      20000,
+    );
+    const waited = Date.now() - archiveWaitStarted;
+    if (waited - lastAnimationLog >= 10000) {
+      console.log("archive animation:", JSON.stringify(archivePlayback));
+      lastAnimationLog = waited;
+    }
+    if (archivePlayback.ok || archivePlayback.error || archivePlayback.accessPhase === "error") break;
+  }
   check(
     "音乐档案 ACCESS FILE 选择并播放对应曲目",
     archivePlayback.ok === true && archivePlayback.id === archiveTarget.id,

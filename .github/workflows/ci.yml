@@ -56,7 +56,7 @@ jobs:
         timeout-minutes: 10
         run: |
           $vlcArchive = 'vlc-3.0.21-win64.zip'
-          $vlcBase = 'https://get.videolan.org/vlc/3.0.21/win64'
+          $vlcBase = 'https://download.videolan.org/pub/videolan/vlc/3.0.21/win64'
           $vlcChecksumPath = Join-Path $PWD '.local/ci/vlc.sha256'
           Invoke-WebRequest -Uri "$vlcBase/$vlcArchive.sha256" -OutFile $vlcChecksumPath
           $vlcExpected = ((Get-Content -LiteralPath $vlcChecksumPath -Raw).Trim() -split '\s+')[0].ToLowerInvariant()

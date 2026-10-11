@@ -24,7 +24,7 @@ const force = args.includes("--force");
 const versionIndex = args.indexOf("--version");
 const VERSION = versionIndex >= 0 ? args[versionIndex + 1] : "3.0.21";
 const ARCH = "win64";
-const BASE = `https://get.videolan.org/vlc/${VERSION}/${ARCH}`;
+const BASE = `https://download.videolan.org/pub/videolan/vlc/${VERSION}/${ARCH}`;
 const ZIP_NAME = `vlc-${VERSION}-${ARCH}.zip`;
 const CACHE = join(ROOT, ".tools", "cache");
 

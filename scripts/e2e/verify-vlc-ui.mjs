@@ -131,6 +131,7 @@ function startBridge() {
       String(PORT),
       "--token",
       TOKEN,
+      ...(process.env.RHINE_VLC_AOUT ? ["--aout", process.env.RHINE_VLC_AOUT] : []),
     ],
     { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
   );

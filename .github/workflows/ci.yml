@@ -29,6 +29,8 @@ jobs:
     needs: verify
     runs-on: windows-2025
     timeout-minutes: 30
+    env:
+      RHINE_VLC_AOUT: dummy
     defaults:
       run:
         shell: pwsh

@@ -23,6 +23,8 @@ const args = process.argv.slice(2);
 const rootIndex = args.indexOf("--root");
 const musicRoot = rootIndex >= 0 ? args[rootIndex + 1] : join(LOCAL_ROOT, "fixtures", `bridge-check-run-${process.pid}`);
 const temporary = rootIndex < 0;
+const headlessAudio = process.env.RHINE_VLC_AOUT === "dummy";
+if (headlessAudio) console.log("# dummy audio output: physical volume checks require a real-output run");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const auth = { authorization: `Bearer ${TOKEN}` };
 const base = `http://127.0.0.1:${PORT}`;
@@ -83,6 +85,7 @@ if (temporary) {
 const bridge = spawn(process.execPath, [
   "--experimental-strip-types", join(ROOT, "scripts", "vlc-bridge.mjs"),
   "--root", musicRoot, "--port", String(PORT), "--token", TOKEN,
+  ...(process.env.RHINE_VLC_AOUT ? ["--aout", process.env.RHINE_VLC_AOUT] : []),
 ], { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
 let log = "";
 bridge.stdout.on("data", (chunk) => (log += chunk));
@@ -178,7 +181,10 @@ try {
     assert.equal((await request(`/api/start?ticket=${again.body.ticket}&client=native-check&sequence=5`)).status, 409);
     const playing = (await request("/api/status")).body;
     assert.equal(playing.state, "playing", "重复票据不能中断已经开始的歌曲");
-    assert.equal(playing.volume, 180);
+    // VLC's dummy output has no volume callback. Real-output runs still check
+    // the applied volume; preparation above always checks the user's intent.
+    if (headlessAudio) console.log("# SKIP applied playback volume: dummy output has no physical volume callback");
+    else assert.equal(playing.volume, 180);
     await request("/api/stop");
   });
   await step("停止使旧准备序号及开始票据失效，恢复用户音量", async () => {
@@ -195,7 +201,8 @@ try {
     assert.equal(state.state, "stopped");
     assert.equal(state.currentId, null);
     assert.equal(state.prepared, false);
-    assert.equal(state.volume, 180);
+    if (headlessAudio) console.log("# SKIP restored output volume: dummy output has no physical volume callback");
+    else assert.equal(state.volume, 180);
     await request("/api/volume?value=256");
   });
   await step(`通过 VLC 播放 ${low.name}`, async () => {

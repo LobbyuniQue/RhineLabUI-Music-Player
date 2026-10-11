@@ -731,11 +731,25 @@ try {
     );
     spacingChecks.push(state);
   }
-  const spacingApplied = await cdp.evaluate(
-    `new Promise(resolve => { const started = performance.now(); const tick = () => { const s = window.rhine.stats(); if (Math.abs(s.rowSpacing - 4.05) < 0.03 || performance.now() - started > 6000) resolve(s.rowSpacing); else setTimeout(tick, 100); }; tick(); })`,
-    true,
-    20000,
-  );
+  // Spacing converges on rendered frames. Software rendering can take more
+  // than six seconds even though the target and persistence are already set.
+  let spacingApplied = NaN;
+  const spacingDeadline = Date.now() + 60000;
+  let nextSpacingLog = Date.now() + 10000;
+  while (Date.now() < spacingDeadline) {
+    const state = await cdp.evaluate(
+      `(() => { const s = window.rhine.stats(); return { rowSpacing: s.rowSpacing, target: s.rowSpacingTarget, fps: s.fps, frames: s.renderedFrames }; })()`,
+      false,
+      20000,
+    );
+    spacingApplied = state.rowSpacing;
+    if (Math.abs(spacingApplied - 4.05) < 0.03) break;
+    if (Date.now() >= nextSpacingLog) {
+      console.log("archive spacing:", JSON.stringify(state));
+      nextSpacingLog = Date.now() + 10000;
+    }
+    await sleep(500);
+  }
   check(
     "音乐档案行距实时更新并持久化（最小/最大/默认）",
     spacingChecks.map((x) => x.target).join(",") === "0.62,8,4.05" &&

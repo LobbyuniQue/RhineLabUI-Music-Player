@@ -460,6 +460,29 @@
   color: var(--theme-accent, #9b7247);
 }
 
+.music-access-status {
+  position: absolute;
+  right: 5%;
+  bottom: 8%;
+  z-index: 8;
+  max-width: 42%;
+  color: var(--theme-ink, #20221d);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.music-access-status[hidden] { display: none; }
+.music-access-status button,
+.music-more {
+  color: var(--theme-ink, #20221d);
+  background: var(--theme-field, #e7e3d9);
+  border: 1px solid var(--theme-line, #b4b0a5);
+  padding: 8px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+.music-access-status button { margin-left: 12px; }
+.music-more { display: block; width: 100%; margin-top: 8px; }
+
 /* Dark surface refinements that the shared theme rules do not cover. */
 [data-dark-surface="true"] .music-bar[data-state="error"] .music-now-text span {
   color: #d98b62;

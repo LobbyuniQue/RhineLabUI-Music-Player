@@ -20,7 +20,7 @@ const coreChecks = [
     "TypeScript",
     ["node_modules/typescript/bin/tsc", "-p", "tsconfig.json", "--noEmit"],
   ],
-  ...["content", "viewport", "music", "playground", "archive-visibility"].map(
+  ...["content", "viewport", "music", "music-player", "music-bridge", "music-library", "music-reveal", "archive-covers", "owned-process", "playground", "archive-visibility", "pwa-cache", "pwa-redirect"].map(
     (name) => [
       name,
       ["--experimental-strip-types", `scripts/check-${name}.mjs`],

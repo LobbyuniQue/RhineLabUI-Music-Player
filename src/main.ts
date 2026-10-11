@@ -36,7 +36,10 @@ import { audioSettingsMarkup } from "./audio-settings";
 import { MusicLibrary } from "./music-library";
 import { MusicPlayer } from "./music-player";
 import { MusicPanel } from "./music-panel";
-import { MusicBridge, type BridgeHealth } from "./music-bridge";
+import { MusicBridge, type BridgeHealth, type BridgeStatus } from "./music-bridge";
+import { MusicRevealGate } from "./music-reveal";
+import { MusicEngineHandoff, type MusicEngine } from "./music-engine";
+import { decryptionFrame, DECRYPTION_END } from "./decryption";
 import { musicSettingsMarkup } from "./music-settings";
 import { clampRowSpacing, MUSIC_ROW_SPACING_DEFAULT, ROW_SPACING_MIN } from "./row-spacing";
 import { SpectrumEnvelope, quietBands, type MusicBands } from "./archive-play-motion";
@@ -105,6 +108,7 @@ $("#stage").innerHTML = `
     <button class="back-button" data-action="back">← <span>ARCHIVE OVERVIEW</span><small>ESC</small></button>
     <div class="object-caption"><span id="object-id">NO.001</span><div>INTERNAL DATABASE</div><small>DRAG TO INSPECT <span>↔</span></small><button class="viewer-open" data-action="model-viewer">360° 查看文档模型 <span>↗</span></button></div>
     <article id="detail-content" class="detail-content"></article>
+    <div id="music-access-status" class="music-access-status" role="status" hidden><span></span><button data-action="retry-music-access" hidden>重新加载 ↻</button></div>
   </section>
   <div class="powered">POWERED BY <b>RHINE LAB</b><i></i></div>
   <footer class="system-footer"><span><i class="status-light"></i> SESSION AUTHORIZED${isWallpaper ? '<button type="button" class="three-toggle" data-action="toggle-three" aria-pressed="true" title="卸载三维模型，保留 2D 界面">3D 开启</button>' : ''}</span><span>JOYCE MOORE <i>／</i> <span id="clock">00:00:00</span></span><button data-action="replay" title="重播启动流程">REINITIALIZE ↗</button></footer>
@@ -195,6 +199,9 @@ if (reviewParams.get("review") === "1") {
 let toastTimer: ReturnType<typeof setTimeout>;
 let previousFocus: HTMLElement | null = null;
 const detailTransition = new SurfaceTransition($("#detail-ui"), undefined, 180, 180);
+const musicReveal = new MusicRevealGate();
+let musicRevealEngine: MusicEngine = "browser";
+let musicRevealRequest = 0;
 const tabTransition = new ContentTransition();
 let modalTransition: SurfaceTransition | undefined;
 let modalClosing = false;
@@ -303,6 +310,7 @@ configureAudio();
 // graph, and the analyser is folded into the archive music reaction.
 const musicLibrary = new MusicLibrary();
 const musicPlayer = new MusicPlayer({
+  mediaSessionActions: false,
   resolve: async (id) => {
     const track = musicLibrary.tracks.find((item) => item.id === id);
     if (!track) return null;
@@ -321,8 +329,9 @@ const musicPlayer = new MusicPlayer({
   onState: () => syncMusicIndicators(),
   onBands: (bands) => applyMusicBands(bands),
   onActiveChange: (active) => {
-    audio.setLocalMusicActive(active);
-    if (!active && scene && !isWallpaper) scene.setPlayfield(false, quietBands(), 1, 0, null, true);
+    const anyPlaying = musicReveal.pending || active || bridgeStatus?.state === "playing";
+    audio.setLocalMusicActive(anyPlaying);
+    if (!anyPlaying && scene && !isWallpaper) scene.setPlayfield(false, quietBands(), 1, 0, null, true);
   },
   onError: (message) => notify(message),
   onTrackChange: () => syncMusicIndicators(),
@@ -333,52 +342,83 @@ musicLibrary.bridgeCoverUrl = (id) => musicBridge.coverUrl(id);
 // from VLC's decoded output drives the same archive reaction as the browser path.
 const bridgeEnvelope = new SpectrumEnvelope();
 let bridgeHealth: BridgeHealth | null = null;
-let bridgeStatus: { state: string; currentId: string | null } | null = null;
+let bridgeStatus: BridgeStatus | null = null;
+let bridgeHadAudio = false;
+let systemMediaKey = "";
+let systemMediaRequest = 0;
 let bridgeStatusElapsed = 1;
 let bridgeStatusBusy = false;
+let bridgeLibraryLoad: { id: object; health: BridgeHealth; promise: Promise<number> } | null = null;
 const musicBridge = new MusicBridge({
   port: prefs.vlcPort,
   token: prefs.vlcToken,
   onBands: (samples) => bridgeEnvelope.ingest(samples, performance.now() / 1000),
   onState: (status) => {
-    const wasPlaying = bridgeStatus?.state === "playing";
-    bridgeStatus = { state: status.state, currentId: status.currentId };
-    if (status.state === "playing" && !wasPlaying) audio.setLocalMusicActive(true);
-    if (status.state !== "playing" && wasPlaying) audio.setLocalMusicActive(false);
+    bridgeStatus = status;
+    bridgeHadAudio = status.state === "playing";
+    audio.setLocalMusicActive(musicReveal.pending || status.state === "playing" || musicPlayer.state().playing);
+    syncMusicIndicators();
   },
   onConnectionChange: (connected, health) => {
     bridgeHealth = health;
-    if (!connected) bridgeStatus = null;
+    if (!connected) {
+      bridgeLibraryLoad = null;
+      bridgeStatus = null;
+      if (musicReveal.pending && musicRevealEngine === "vlc") failMusicReveal("VLC 连接已中断，请重试");
+      const browserPlaying = musicPlayer.state().playing;
+      audio.setLocalMusicActive(browserPlaying);
+      if (!browserPlaying && prefs.musicEngine === "vlc" && scene && !isWallpaper)
+        scene.setPlayfield(false, quietBands(), 1, 0, null, true);
+    }
     bridgeStatusElapsed = connected ? .75 : 1;
     syncMusicIndicators();
     refreshMusicSettings();
+    if (connected) void loadBridgeLibrary();
   },
 });
 async function refreshBridgeStatus() {
   if (!musicBridge.connected || bridgeStatusBusy) return;
   bridgeStatusBusy = true;
   try {
-    const status = await musicBridge.status();
-    bridgeStatus = status
-      ? { state: status.state, currentId: status.currentId }
-      : { state: "stopped", currentId: null };
+    // MusicBridge publishes only current-session responses through onState;
+    // a delayed or cancelled poll must not repopulate state after disconnect.
+    await musicBridge.status();
   } finally {
     bridgeStatusBusy = false;
   }
 }
-async function loadBridgeLibrary() {
-  const tracks = await musicBridge.library().catch(() => []);
-  musicLibrary.useBridgeTracks(tracks, bridgeHealth?.root ?? "VLC 桥接");
-  musicPanel.refreshLibrary();
-  refreshMusicSettings();
-  onLibraryMayHaveChanged();
-  return tracks.length;
+async function loadBridgeLibrary(force = false) {
+  const health = musicBridge.info;
+  if (prefs.musicEngine !== "vlc" || !musicBridge.connected || !health) return 0;
+  // onConnectionChange and the manual connect action share the same load;
+  // a new health object identifies a new stream/session after reconnection.
+  if (!force && bridgeLibraryLoad?.health === health) return bridgeLibraryLoad.promise;
+  const id = {};
+  const task: Promise<number> = (async () => {
+    const tracks = await musicBridge.library().catch(() => null);
+    if (!tracks) {
+      if (bridgeLibraryLoad?.id === id) bridgeLibraryLoad = null;
+      return 0;
+    }
+    if (prefs.musicEngine !== "vlc" || !musicBridge.connected ||
+      musicBridge.info !== health || bridgeLibraryLoad?.id !== id) return 0;
+    musicLibrary.useBridgeTracks(tracks, health.root ?? "VLC 桥接");
+    musicBridge.queueTracks(tracks);
+    musicPanel.refreshLibrary();
+    refreshMusicSettings();
+    onLibraryMayHaveChanged();
+    return tracks.length;
+  })();
+  bridgeLibraryLoad = { id, health, promise: task };
+  return task;
 }
 async function connectMusicBridge(silent = false) {
+  const wasConnected = musicBridge.connected;
   const health = await musicBridge.connect();
   if (health) {
-    const count = await loadBridgeLibrary();
-    if (!silent) notify(`已连接 VLC 内核：${count} 首曲目`);
+    const count = await loadBridgeLibrary(wasConnected);
+    if (!silent && musicBridge.connected && musicBridge.info === health)
+      notify(`已连接 VLC 内核：${count} 首曲目`);
   } else if (!silent) {
     notify(musicBridge.error || "未检测到本地 VLC 桥接服务");
   }
@@ -395,26 +435,63 @@ function abandonLauncherHandoff() {
   launcherSession = null;
   launcherHandoffPending = false;
 }
-async function setMusicEngine(engine: "browser" | "vlc") {
-  if (prefs.musicEngine === engine) return;
-  prefs.musicEngine = engine;
-  if (launcherSession) {
-    launcherSession = { ...launcherSession, autoConnect: engine === "vlc" };
-    writeLauncherSession(launcherSession);
+const engineHandoff = new MusicEngineHandoff({
+  current: () => prefs.musicEngine,
+  cancelPending: () => {
+    void cancelMusicArchive();
+    musicLibrary.cancelPending();
+    musicPanel.cancelPending();
+  },
+  stop: async (engine) => {
+    if (engine === "browser") { musicPlayer.stop(); return; }
+    if (!musicBridge.connected) {
+      if (bridgeHadAudio) throw new Error("无法确认 VLC 已停止，请恢复桥接连接后切换");
+      return;
+    }
+    const state = await musicBridge.stop();
+    if (!state || state.state === "playing") throw new Error("VLC 未能停止，本次内核切换已取消");
+    bridgeHadAudio = false;
+  },
+  apply: async (engine, current) => {
+    prefs.musicEngine = engine;
+    if (launcherSession) {
+      launcherSession = { ...launcherSession, autoConnect: engine === "vlc" };
+      writeLauncherSession(launcherSession);
+    }
+    saveAudioPrefs();
+    if (engine === "vlc") {
+      if (!musicBridge.connected) await connectMusicBridge();
+      else await loadBridgeLibrary();
+    } else {
+      musicBridge.disconnect();
+      await musicLibrary.restore().catch(() => false);
+      if (!current()) return;
+      musicPanel.refreshLibrary();
+      onLibraryMayHaveChanged();
+      notify("已切换为浏览器内核");
+    }
+  },
+  changed: () => { refreshMusicSettings(); syncSystemMedia(); },
+  error: (error) => notify(error instanceof Error ? error.message : "播放内核切换失败"),
+});
+function setMusicEngine(engine: MusicEngine) { return engineHandoff.switchTo(engine); }
+async function disconnectMusicBridge() {
+  if (engineHandoff.busy) return;
+  await cancelMusicArchive();
+  musicPanel.cancelPending();
+  if (musicBridge.connected) {
+    const state = await musicBridge.stop().catch(() => null);
+    if (!state || state.state === "playing") {
+      notify("无法确认 VLC 已停止，请恢复连接后重试断开");
+      return;
+    }
+  } else if (bridgeHadAudio) {
+    notify("VLC 连接已中断，恢复连接后才能确认播放已停止");
+    return;
   }
-  saveAudioPrefs();
-  if (engine === "vlc") {
-    if (!musicBridge.connected) await connectMusicBridge();
-    else await loadBridgeLibrary();
-  } else {
-    musicBridge.disconnect();
-    bridgeStatus = null;
-    audio.setLocalMusicActive(false);
-    await musicLibrary.restore().catch(() => false);
-    musicPanel.refreshLibrary();
-    notify("已切换为浏览器内核");
-  }
+  musicBridge.disconnect();
   refreshMusicSettings();
+  notify("已停止播放并断开 VLC 桥接");
 }
 
 // ------------------------------------------------------ library mode (2.0)
@@ -457,6 +534,10 @@ function applyRowSpacing(immediate = false) {
   scene?.setRowSpacing(rowSpacingForView(), immediate);
 }
 function applyView(v: ArchiveView, preferBackingId?: string) {
+  if (musicReveal.pending || musicReveal.holding) {
+    void cancelMusicArchive();
+    if (mode === "detail") setMode("archive");
+  }
   setActiveView(v);
   applyRowSpacing();
   const mem = memoryFor(v);
@@ -476,28 +557,54 @@ function applyView(v: ArchiveView, preferBackingId?: string) {
 const currentBackingId = () => view().backingId(selected);
 
 // ------------------------------------------------------ cover art (2.0)
-// The atlas packs every track's cover so each card in the array samples one
-// tile through its per-instance index; art decodes asynchronously and fills in.
+// Pin the covers used by this frame before assigning per-instance tiles.
+// Allocation tickets and library generations reject late artwork after reuse.
 const coverAtlas = new CoverAtlas();
-const coverRequested = new Set<string>();
-const coverLoading = new Set<string>();
+const coverLoading = new Map<string, number>();
 const coverRetryAt = new Map<string, number>();
+let coverGeneration = 0;
+let visibleCoverIds: string[] = [];
+function pinMusicCovers() {
+  const ids = new Set(visibleCoverIds);
+  if (view().kind === "music") ids.add(view().backingId(selected));
+  const playing = musicPlayer.state().id;
+  if (playing) ids.add(playing);
+  if (bridgeStatus?.currentId) ids.add(bridgeStatus.currentId);
+  musicLibrary.pinCoverIds(ids);
+}
+function prepareCoverFrame(recordIndices: readonly number[]) {
+  const v = view();
+  const tracks = v.kind === "music" ? (v as MusicArchiveView).musicTracks : [];
+  const ids = recordIndices.flatMap((index) => {
+    const track = tracks[index];
+    return track?.hasCover ? [track.id] : [];
+  });
+  coverAtlas.retain(ids);
+  visibleCoverIds = ids.filter(id => coverAtlas.ticketFor(id) !== undefined);
+  pinMusicCovers();
+  coverAtlas.flush();
+}
 function coverTileFor(recordIndex: number): number {
   const v = view();
   if (v.kind !== "music") return 0;
   const track = (v as MusicArchiveView).musicTracks[recordIndex];
-  if (!track) return 0;
+  if (!track?.hasCover) return 0;
   const tile = coverAtlas.tileFor(track.id);
+  const ticket = coverAtlas.ticketFor(track.id);
   const retryAt = coverRetryAt.get(track.id) ?? 0;
-  if (track.hasCover && performance.now() >= retryAt && !coverAtlas.filled.has(track.id) && !coverRequested.has(track.id) && !coverLoading.has(track.id)) {
-    coverLoading.add(track.id);
-    void loadCoverIntoAtlas(track);
+  if (tile && ticket !== undefined && performance.now() >= retryAt && !coverAtlas.filled.has(track.id) && coverLoading.get(track.id) !== ticket) {
+    coverLoading.set(track.id, ticket);
+    void loadCoverIntoAtlas(track, ticket, coverGeneration);
   }
   return tile;
 }
-async function loadCoverIntoAtlas(track: LibraryTrack) {
+async function loadCoverIntoAtlas(track: LibraryTrack, ticket: number, generation: number) {
+  const current = () => generation === coverGeneration && coverAtlas.ticketFor(track.id) === ticket;
+  let lease: Awaited<ReturnType<MusicLibrary["acquireCover"]>> = null;
   try {
-    const url = await musicLibrary.coverUrl(track);
+    lease = await musicLibrary.acquireCover(track);
+    const url = lease?.url;
+    if (!current()) return;
     if (!url) {
       coverRetryAt.set(track.id, performance.now() + 2000);
       return;
@@ -508,40 +615,63 @@ async function loadCoverIntoAtlas(track: LibraryTrack) {
       image.onerror = () => reject(new Error("cover image failed to load"));
       image.src = url;
     });
-    coverAtlas.fill(track.id, image);
-    coverRequested.add(track.id);
-    coverRetryAt.delete(track.id);
+    if (current() && coverAtlas.fill(track.id, image, ticket)) coverRetryAt.delete(track.id);
   } catch {
     // Avoid retrying a missing cover on every visible instance every frame.
-    coverRetryAt.set(track.id, performance.now() + 2000);
+    if (current()) coverRetryAt.set(track.id, performance.now() + 2000);
   } finally {
-    coverLoading.delete(track.id);
+    lease?.release();
+    if (coverLoading.get(track.id) === ticket) coverLoading.delete(track.id);
   }
 }
-const labelCoverTried = new Set<string>();
-const labelCoverLoading = new Set<string>();
+const labelCoverLoading = new Map<string, number>();
+let labelCoverCache: { id: string; image: HTMLImageElement } | null = null;
+function resetCoverCache() {
+  coverGeneration++;
+  coverAtlas.reset();
+  coverLoading.clear();
+  coverRetryAt.clear();
+  labelCoverLoading.clear();
+  labelCoverCache = null;
+  visibleCoverIds = [];
+  systemMediaKey = "";
+  ++systemMediaRequest;
+  pinMusicCovers();
+}
 function requestLabelCover(recordIndex: number) {
   const v = view();
   if (v.kind !== "music" || !scene) return;
   const track = (v as MusicArchiveView).musicTracks[recordIndex];
-  if (!track?.hasCover || labelCoverTried.has(track.id) || labelCoverLoading.has(track.id)) return;
-  labelCoverLoading.add(track.id);
+  if (!track?.hasCover) return;
+  if (labelCoverCache?.id === track.id) {
+    scene.redrawLabel(recordIndex, labelCoverCache.image);
+    return;
+  }
+  if (labelCoverLoading.has(track.id)) return;
+  const generation = coverGeneration;
+  const targetScene = scene;
+  labelCoverLoading.set(track.id, generation);
   void (async () => {
+    let lease: Awaited<ReturnType<MusicLibrary["acquireCover"]>> = null;
     try {
-      const url = await musicLibrary.coverUrl(track);
-      if (!url) return;
+      lease = await musicLibrary.acquireCover(track);
+      const url = lease?.url;
+      if (!url || generation !== coverGeneration) return;
       const image = new Image();
       await new Promise<void>((resolve, reject) => {
         image.onload = () => resolve();
         image.onerror = () => reject(new Error("cover image failed to load"));
         image.src = url;
       });
-      labelCoverTried.add(track.id);
-      if (view().kind === "music" && selected === recordIndex) scene?.redrawLabel(recordIndex, image);
+      const currentView = view();
+      if (generation !== coverGeneration || scene !== targetScene || currentView.kind !== "music" || currentView.backingId(selected) !== track.id) return;
+      labelCoverCache = { id: track.id, image };
+      targetScene.redrawLabel(selected, image);
     } catch {
       // A missing cover is retried when the selection is revisited.
     } finally {
-      labelCoverLoading.delete(track.id);
+      lease?.release();
+      if (labelCoverLoading.get(track.id) === generation) labelCoverLoading.delete(track.id);
     }
   })();
 }
@@ -574,6 +704,7 @@ function setMusicGrouping(grouping: MusicGrouping) {
   refreshMusicSettings();
 }
 function onLibraryMayHaveChanged() {
+  resetCoverCache();
   if (prefs.libraryMode !== "music") return;
   if (!musicLibrary.tracks.length) {
     prefs.libraryMode = "archive";
@@ -597,6 +728,8 @@ const musicHost = {
   player: musicPlayer,
   bridge: musicBridge,
   engine: () => prefs.musicEngine,
+  canControl: () => !engineHandoff.busy,
+  beforePlayback: () => cancelMusicArchive(),
   onSound: (sound: Parameters<typeof audio.play>[0], pan?: number) => audio.play(sound, pan),
   onNotify: (message: string) => notify(message),
   onOpenSettings: () => closeModal(() => openModal("settings")),
@@ -610,12 +743,83 @@ const musicHost = {
   },
 };
 musicPanel.attach(musicHost);
+if (navigator.mediaSession) {
+  const handlers: Partial<Record<MediaSessionAction, MediaSessionActionHandler>> = {
+    play: () => void systemMediaAction("play"),
+    pause: () => void systemMediaAction("pause"),
+    stop: () => void systemMediaAction("stop"),
+    nexttrack: () => void systemMediaAction("next"),
+    previoustrack: () => void systemMediaAction("previous"),
+    seekbackward: (event) => void systemMediaAction("seek", -(event.seekOffset ?? 10)),
+    seekforward: (event) => void systemMediaAction("seek", event.seekOffset ?? 10),
+    seekto: (event) => void systemMediaAction("seekTo", event.seekTime ?? 0),
+  };
+  for (const [action, handler] of Object.entries(handlers)) {
+    try { navigator.mediaSession.setActionHandler(action as MediaSessionAction, handler!); } catch { /* optional action */ }
+  }
+}
 let lastMusicBands: MusicBands = quietBands();
 function syncMusicIndicators() {
+  pinMusicCovers();
   const state = musicPlayer.state();
+  const playing = prefs.musicEngine === "vlc" ? bridgeStatus?.state === "playing" : state.playing;
+  const id = prefs.musicEngine === "vlc" ? bridgeStatus?.currentId : state.id;
   const node = document.querySelector("#music-nav-state");
-  if (node) node.textContent = state.playing ? "PLAYING" : state.id ? "PAUSED" : "OFF";
-  document.querySelector('[data-action="music"]')?.classList.toggle("playing", state.playing);
+  if (node) node.textContent = playing ? "PLAYING" : id ? "PAUSED" : "OFF";
+  document.querySelector('[data-action="music"]')?.classList.toggle("playing", playing);
+  syncSystemMedia();
+}
+
+function syncSystemMedia() {
+  const session = navigator.mediaSession;
+  if (!session) return;
+  const browser = musicPlayer.state();
+  const vlc = prefs.musicEngine === "vlc";
+  const id = vlc ? bridgeStatus?.currentId ?? null : browser.id;
+  const playing = vlc ? bridgeStatus?.state === "playing" : browser.playing;
+  session.playbackState = playing ? "playing" : id ? "paused" : "none";
+  if (!vlc) { systemMediaKey = ""; ++systemMediaRequest; return; }
+  const track = musicLibrary.tracks.find(item => item.id === id);
+  const key = track ? `${track.id}:${track.title}:${track.artist}:${track.album}` : "";
+  if (key === systemMediaKey) return;
+  systemMediaKey = key;
+  const request = ++systemMediaRequest;
+  if (!track || typeof MediaMetadata === "undefined") { session.metadata = null; return; }
+  const metadata = { title: track.title, artist: track.artist, album: track.album };
+  session.metadata = new MediaMetadata(metadata);
+  void musicLibrary.acquireCover(track).then(lease => {
+    if (!lease) return;
+    try {
+      if (request === systemMediaRequest && prefs.musicEngine === "vlc" && bridgeStatus?.currentId === track.id)
+        session.metadata = new MediaMetadata({ ...metadata, artwork: [{ src: lease.url }] });
+    } finally { lease.release(); }
+  }).catch(() => {});
+}
+
+async function systemMediaAction(action: "play" | "pause" | "stop" | "next" | "previous" | "seek" | "seekTo", value = 0) {
+  if (engineHandoff.busy || (action === "play" && musicReveal.pending)) return;
+  const engine = prefs.musicEngine;
+  try {
+    await cancelMusicArchive(action !== "next" && action !== "previous");
+    if (engineHandoff.busy || prefs.musicEngine !== engine) return;
+    if (prefs.musicEngine === "vlc") {
+      if (!musicBridge.connected) return;
+      if (action === "play" && bridgeStatus?.state !== "playing") await musicBridge.resume();
+      if (action === "pause" && bridgeStatus?.state === "playing") await musicBridge.pause();
+      if (action === "stop") await musicBridge.stop();
+      if (action === "next") await musicBridge.next();
+      if (action === "previous") await musicBridge.previous();
+      if (action === "seek" || action === "seekTo") await musicBridge.seek(action === "seekTo" ? value : (bridgeStatus?.time ?? 0) + value);
+    } else {
+      if (action === "play" && !musicPlayer.isPlaying()) await musicPlayer.resume();
+      if (action === "pause") musicPlayer.pause();
+      if (action === "stop") musicPlayer.stop();
+      if (action === "next") await musicPlayer.next();
+      if (action === "previous") await musicPlayer.previous();
+      if (action === "seek") musicPlayer.seekBy(value);
+      if (action === "seekTo") musicPlayer.seekBy(value - musicPlayer.state().position);
+    }
+  } catch (error) { notify(error instanceof Error ? error.message : "播放操作失败"); }
 }
 /** Feeds the archive scene's existing music reaction with the local track. */
 function applyMusicBands(bands: MusicBands) {
@@ -649,13 +853,15 @@ function refreshMusicSettings() {
   if (panel) panel.scrollTop = scroll;
 }
 async function runMusicSetting(action: string) {
+  if (engineHandoff.busy) return;
   if (action === "pick") {
     if (prefs.musicEngine === "vlc") {
       notify("VLC 内核下由桥接服务扫描目录，请改用「浏览器内核」或重新指定 --root");
       return;
     }
     try {
-      await musicLibrary.pick();
+      const picked = await musicLibrary.pick();
+      if (!picked || prefs.musicEngine !== "browser" || engineHandoff.busy) return;
       notify(`已选择目录：${musicLibrary.label}`);
       await musicPanel.startScan();
     } catch (e) {
@@ -668,8 +874,20 @@ async function runMusicSetting(action: string) {
     return;
   }
   if (action === "clear") {
+    const engine = prefs.musicEngine;
+    await cancelMusicArchive();
+    if (engineHandoff.busy || prefs.musicEngine !== engine) return;
+    musicPanel.cancelPending();
+    if (prefs.musicEngine === "vlc" && musicBridge.connected) {
+      const stopped = await musicBridge.stop().catch(() => null);
+      if (engineHandoff.busy || prefs.musicEngine !== engine) return;
+      if (!stopped || stopped.state === "playing") { notify("请先停止 VLC 播放后再清除索引"); return; }
+    }
     musicPlayer.stop();
     await musicLibrary.clear();
+    if (engineHandoff.busy || prefs.musicEngine !== engine) return;
+    musicPanel.refreshLibrary();
+    onLibraryMayHaveChanged();
     refreshMusicSettings();
     notify("已清除本地曲库索引");
     audio.play("confirm");
@@ -809,6 +1027,7 @@ refreshFileTicks();
 
 function setMode(next: Mode) {
   if (workbench?.enabled && next === "detail") next = "archive";
+  if (next !== "detail") void cancelMusicArchive();
   const previousMode = mode;
   rollingTitles.forEach(title => title.update({ animated: motionActive("rollingText") && next === "archive" }));
   if (next !== "archive") {
@@ -962,39 +1181,99 @@ function musicPlayerTrack(track: LibraryTrack) {
     codec: track.codec,
   };
 }
-async function playSelectedMusicArchive() {
-  if (activeView().kind !== "music") return;
-  const musicView = activeView() as MusicArchiveView;
-  const track = musicView.musicTracks[selected] ?? musicLibrary.tracks.find((item) => item.id === musicView.backingId(selected));
-  if (!track) {
-    notify("当前音乐档案没有对应曲目");
-    return;
-  }
-  if (prefs.musicEngine === "vlc" || track.bridge) {
-    if (prefs.musicEngine !== "vlc" || !musicBridge.connected) {
-      notify("VLC 桥接未连接，无法播放当前曲目");
+function syncMusicAccess() {
+  const state = musicReveal.state();
+  const node = $("#music-access-status");
+  const visible = state.phase !== "idle" && state.phase !== "playing";
+  node.hidden = !visible || mode !== "detail";
+  node.querySelector("span")!.textContent = state.phase === "error" ? state.error
+    : state.phase === "loading" ? "正在准备音乐…" : state.phase === "starting" ? "正在开始播放…" : "";
+  node.querySelector<HTMLButtonElement>("button")!.hidden = state.phase !== "error";
+  $("#detail-content").dataset.revealHeld = String(musicReveal.holding);
+  $("#detail-content").setAttribute("aria-busy", String(musicReveal.pending));
+  $("#stage").dataset.musicAccess = state.phase;
+}
+
+function failMusicReveal(message: string, request = musicRevealRequest) {
+  if (!musicReveal.isCurrent(request)) return;
+  musicReveal.fail(request, message);
+  scene?.setDecryptionHeld(true);
+  audio.setLocalMusicActive(musicPlayer.isPlaying() || bridgeStatus?.state === "playing");
+  syncMusicAccess();
+}
+
+function cancelMusicArchive(stopPrepared = true): Promise<void> {
+  const stop = stopPrepared && (musicReveal.pending || musicReveal.holding);
+  const engine = musicRevealEngine;
+  musicReveal.cancel();
+  scene?.setDecryptionHeld(false);
+  syncMusicAccess();
+  audio.setLocalMusicActive(musicPlayer.isPlaying() || bridgeStatus?.state === "playing");
+  if (!stop) return Promise.resolve();
+  if (engine === "browser") { musicPlayer.stop(); return Promise.resolve(); }
+  if (!musicBridge.connected) return Promise.resolve();
+  return musicBridge.stop().then(() => undefined).catch(() => undefined);
+}
+
+function prepareMusicArchive(track: LibraryTrack) {
+  const stopped = cancelMusicArchive();
+  const request = musicRevealRequest = musicReveal.begin(track.id);
+  const engine = musicRevealEngine = prefs.musicEngine;
+  scene?.setDecryptionHeld(true);
+  audio.setLocalMusicActive(true);
+  syncMusicAccess();
+  musicPlayer.queueTracks(musicLibrary.tracks.map(musicPlayerTrack));
+  musicBridge.queueTracks(musicLibrary.tracks);
+  // Browser preparation starts in the click's user gesture to unlock audio.
+  const preparation = engine === "browser" ? musicPlayer.prepare(track) : (async () => {
+    await stopped;
+    if (!musicReveal.isCurrent(request)) return false;
+    if (!musicBridge.connected) return false;
+    return musicBridge.prepare(track.id);
+  })();
+  void preparation.then((prepared) => {
+    if (!musicReveal.isCurrent(request) || prefs.musicEngine !== engine) return;
+    if (!prepared) {
+      failMusicReveal((engine === "vlc" ? musicBridge.error : musicPlayer.state().error) || "音乐未能加载，请重试或返回曲库", request);
       return;
     }
-    const status = await musicBridge.play(track.id).catch(() => null);
-    if (status) {
-      bridgeStatus = { state: status.state, currentId: status.currentId };
-      syncMusicIndicators();
-      notify(`正在播放：${track.title}`);
-    } else {
-      notify(musicBridge.error || "VLC 无法播放当前曲目");
-    }
-    return;
-  }
-  musicPlayer.queueTracks(musicLibrary.tracks.map(musicPlayerTrack));
-  await musicPlayer.play(track);
-  if (musicPlayer.state().id === track.id && !musicPlayer.state().error) notify(`正在播放：${track.title}`);
+    musicReveal.prepared(request);
+    scene?.setDecryptionHeld(false);
+    syncMusicAccess();
+  }).catch(() => failMusicReveal("音乐未能加载，请重试或返回曲库", request));
+  return request;
 }
+
+function finishMusicRevealFrame(ms: number) {
+  if (mode !== "detail" || modal || viewer?.isOpen) return;
+  const request = musicReveal.completeFrame(documentDecryption.complete &&
+    (!scene || scene.decryptionFrame.phase === "clear"), ms);
+  if (request === null) return;
+  // This call and the final text-mask update run in the same animation frame.
+  const start = musicRevealEngine === "vlc" ? musicBridge.startPrepared() : musicPlayer.startPrepared();
+  syncMusicAccess();
+  void start.then((ok) => {
+    if (!musicReveal.isCurrent(request)) return;
+    musicReveal.started(request, ok);
+    if (!ok) failMusicReveal("音乐未能开始播放，请重试", request);
+    syncMusicAccess();
+    syncSystemMedia();
+  }).catch(() => failMusicReveal("音乐未能开始播放，请重试", request));
+}
+
 function openFile() {
-  if (!ready) return;
+  if (!ready || engineHandoff.busy) return;
+  const v = activeView();
+  const track = v.kind === "music" ? (v as MusicArchiveView).musicTracks[selected] : null;
+  const request = track ? prepareMusicArchive(track) : null;
   closeModal(() => {
+    if (request !== null && !musicReveal.isCurrent(request)) return;
     setMode("detail");
+    if (track) {
+      documentDecryption.reset($("#detail-content"), false);
+      syncMusicAccess();
+    }
     audio.play("open");
-    void playSelectedMusicArchive();
   });
 }
 function toggleSaved() {
@@ -1040,7 +1319,8 @@ function renderDetail() {
   <div class="detail-footnote">${r.source ? `<a href="${escapeHtml(r.source)}" target="_blank" rel="noopener">设定参考 ↗</a>` : "<i></i>"}<span>${String(selected + 1).padStart(3, "0")} / ${String(v.records.length).padStart(3, "0")}</span></div>`;
   $("#detail-content").setAttribute("tabindex", "-1");
   if (!isMusic) $('[data-action="bookmark"]').setAttribute("aria-pressed", String(saved.has(r.id)));
-  documentDecryption.reset($("#detail-content"), !motionActive("documentReveal") || !scene || scene.decryptionFrame.phase === "clear");
+  documentDecryption.reset($("#detail-content"), !musicReveal.pending && !musicReveal.holding &&
+    (!motionActive("documentReveal") || !scene || scene.decryptionFrame.phase === "clear"));
   setTab(activeTab, false);
 }
 function overview() {
@@ -1102,6 +1382,7 @@ function notify(message: string) {
 
 function openModal(kind: NonNullable<typeof modal>) {
   if (!ready) return;
+  if (musicReveal.pending || musicReveal.holding) void cancelMusicArchive();
   if (!modal) {
     previousFocus = document.activeElement as HTMLElement;
     modalSiblings = [...$("#stage").children]
@@ -1327,13 +1608,7 @@ document.addEventListener("click", (e) => {
   if (el.dataset.musicBridge) {
     const action = el.dataset.musicBridge;
     if (action === "connect") void connectMusicBridge();
-    else if (action === "disconnect") {
-      musicBridge.disconnect();
-      bridgeStatus = null;
-      audio.setLocalMusicActive(false);
-      refreshMusicSettings();
-      notify("已断开 VLC 桥接");
-    }
+    else if (action === "disconnect") void disconnectMusicBridge();
     return;
   }
   if (el.dataset.musicSetting) {
@@ -1388,6 +1663,7 @@ document.addEventListener("click", (e) => {
     return;
   }
   const action = el.dataset.action;
+  if (action === "retry-music-access") { openFile(); return; }
   if (action === "toggle-three") { void toggleThree(); return; }
   if (action === "library-mode") {
     setLibraryMode(prefs.libraryMode === "music" ? "archive" : "music");
@@ -1410,6 +1686,7 @@ document.addEventListener("click", (e) => {
   if (action === "column-next") stepColumn(1);
   if (action === "open") openFile();
   if (action === "model-viewer" && mode === "detail" && scene) {
+    if (musicReveal.pending || musicReveal.holding) void cancelMusicArchive();
     const activeScene = scene;
     // Safari does not always focus a button when it is tapped. Capture the
     // actual opener so closing the modal reliably restores the right control.
@@ -1616,7 +1893,6 @@ function frame(ms: number) {
   // ticking with the music even when the panel (and its own tick) is closed.
   musicPlayer.tick(musicDt);
   musicPanel.tick(musicDt);
-  coverAtlas.flush();
   // VLC path: the bridge taps VLC's decoded PCM, so the archive reaction follows
   // whatever codec VLC is playing.
   if (prefs.musicEngine === "vlc" && musicBridge.connected) {
@@ -1644,16 +1920,19 @@ function frame(ms: number) {
   viewer?.update(time);
   if (threeState === "closing" && scene?.presentationHidden) releaseThree();
   playground?.position();
-  if (scene && mode === "detail") {
-    documentDecryption.update(time, scene.decryptionFrame, !motionActive("documentReveal"));
-    $("#detail-content").style.opacity = String(scene.detailVisibility);
+  if (mode === "detail") {
+    documentDecryption.update(time, scene?.decryptionFrame ?? decryptionFrame(DECRYPTION_END),
+      !motionActive("documentReveal") || !scene, musicReveal.holding);
+    const visibility = scene?.detailVisibility ?? 1;
+    $("#detail-content").style.opacity = String(visibility);
     $("#detail-content").style.translate =
-      `0 ${(1 - scene.detailVisibility) * 18}px`;
-    $("#detail-content").inert = scene.detailVisibility < 0.1;
-    if (pendingDetailFocus && scene.detailVisibility >= 0.1 && !modal && !viewer?.isOpen) {
+      `0 ${(1 - visibility) * 18}px`;
+    $("#detail-content").inert = visibility < 0.1 || musicReveal.pending || musicReveal.holding;
+    if (pendingDetailFocus && visibility >= 0.1 && !musicReveal.pending && !musicReveal.holding && !modal && !viewer?.isOpen) {
       $("#detail-content").focus({ preventScroll: true });
       pendingDetailFocus = false;
     }
+    finishMusicRevealFrame(ms);
   }
   $("#stage").style.setProperty("--detail-shade", String(mode === "boot" ? 0 : scene?.detailVisibility ?? 0));
   const currentScene = scene;
@@ -1674,8 +1953,9 @@ function frame(ms: number) {
   requestAnimationFrame(frame);
 }
 function bindScene(scene: ArchiveScene, cell?: { lane: number; row: number }) {
+    scene.setDecryptionHeld(musicReveal.holding);
     scene.setRowSpacing(rowSpacingForView(), true);
-    scene.setCoverProvider(coverTileFor, coverAtlas.texture);
+    scene.setCoverProvider(coverTileFor, coverAtlas.texture, prepareCoverFrame);
     scene.select(selected, cell ? { cell } : undefined);
     scene.setRhythmStyle(prefs.musicRhythm);
     scene.onSelect = (i, cell) => {
@@ -1728,7 +2008,7 @@ function releaseThree() {
     $("#detail-content").style.opacity = "1";
     $("#detail-content").style.translate = "0 0";
     $("#detail-content").inert = false;
-    documentDecryption.reset($("#detail-content"), true);
+    documentDecryption.reset($("#detail-content"), !musicReveal.pending && !musicReveal.holding);
   }
   threeState = "off"; syncThreeButton();
   $("#hover-label").hidden = true;
@@ -1844,8 +2124,8 @@ function completeStartup(silent: boolean) {
     }
   }, fade);
   requestAnimationFrame(frame);
-  // Do not compete with entry audio/font downloads. Full offline installation
-  // begins after startup is complete and remains atomic.
+  // Do not compete with entry audio/font downloads. Core offline installation
+  // begins after startup; optional font shards are downloaded on demand.
   setTimeout(() => void initPwa(notify), 1500);
 }
 updateSelection();
@@ -1854,6 +2134,7 @@ syncLibraryModeUI();
 // lazily, so kick the restore here and swap views once tracks are known.
 if (prefs.libraryMode === "music" && !musicLibrary.tracks.length && prefs.musicEngine === "browser") {
   void musicLibrary.restore().then((restored) => {
+    if (prefs.musicEngine !== "browser" || engineHandoff.busy) return;
     if (restored) onLibraryMayHaveChanged();
     else {
       prefs.libraryMode = "archive";
@@ -1984,6 +2265,8 @@ Object.assign(window, {
       audio: audio.stats(),
       music: {
         ...musicPlayer.state(),
+        access: musicReveal.state(),
+        switching: engineHandoff.busy,
         tracks: musicLibrary.tracks.length,
         label: musicLibrary.label,
         persistent: musicLibrary.persistent,
@@ -2001,6 +2284,9 @@ Object.assign(window, {
       library: musicLibrary,
       player: musicPlayer,
       panel: musicPanel,
+      access: () => musicReveal.state(),
+      setEngine: (engine: MusicEngine) => setMusicEngine(engine),
+      mediaAction: systemMediaAction,
       rescan: () => musicPanel.startScan(),
       search: (query: string, field?: "all" | "title" | "artist" | "album") =>
         musicLibrary.search(query, field ?? "all").map((track) => ({
@@ -2036,7 +2322,6 @@ Object.assign(window, {
       }),
       bridgePlay: async (id: string) => {
         const status = await musicBridge.play(id).catch(() => null);
-        if (status) bridgeStatus = { state: status.state, currentId: status.currentId };
         return status;
       },
       bridgeSeek: (seconds: number) => musicBridge.seek(seconds).catch(() => null),
@@ -2049,5 +2334,10 @@ Object.assign(window, {
     },
   },
 });
-if (import.meta.hot) import.meta.hot.dispose(() => audio.dispose());
+if (import.meta.hot) import.meta.hot.dispose(() => {
+  musicBridge.dispose();
+  musicPlayer.dispose();
+  musicLibrary.releaseCovers();
+  audio.dispose();
+});
 

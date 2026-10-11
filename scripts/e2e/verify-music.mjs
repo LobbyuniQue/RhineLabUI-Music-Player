@@ -55,7 +55,8 @@ class Cdp {
         );
       }
       if (message.id && this.pending.has(message.id)) {
-        const { resolve, reject } = this.pending.get(message.id);
+        const { resolve, reject, timer } = this.pending.get(message.id);
+        clearTimeout(timer);
         this.pending.delete(message.id);
         message.error
           ? reject(new Error(JSON.stringify(message.error)))
@@ -66,9 +67,10 @@ class Cdp {
   send(method, params = {}, timeoutMs = 90000) {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const pending = { resolve, reject, timer: null };
+      this.pending.set(id, pending);
       this.socket.send(JSON.stringify({ id, method, params }));
-      setTimeout(() => {
+      pending.timer = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
           reject(new Error(`${method} timed out`));
@@ -564,12 +566,48 @@ try {
     JSON.stringify({ ...musicMode, expected: expectedAlbumColumns }),
   );
   const archiveTarget = await cdp.evaluate(
-    `(() => { const title = document.querySelector('#selected-title')?.textContent?.trim() ?? ''; const track = window.rhine.music.library.tracks.find(t => t.title === title); return { id: track?.id ?? '', title: track?.title ?? '', artist: track?.artist?.trim() || '未知艺术家' }; })()`,
+    `(() => { const tick = document.querySelector('#file-ticks [aria-pressed="true"]'); const title = (tick?.title ?? '').replace(/^M-\\d+\\s*·\\s*/, '').trim() || document.querySelector('#selected-title')?.textContent?.trim() || ''; const track = window.rhine.music.library.tracks.find(t => t.title === title); return { id: track?.id ?? '', title: track?.title ?? '', artist: track?.artist?.trim() || '未知艺术家' }; })()`,
     false,
     20000,
   );
+  await cdp.evaluate(`(() => {
+    const music = window.rhine.music;
+    music.player.stop();
+    window.__originalFile = music.library.file.bind(music.library);
+    window.__startFrames = [];
+    const start = music.player.startPrepared.bind(music.player);
+    music.player.startPrepared = function () {
+      window.__startFrames.push({ phase: music.access().phase, frame: music.access().startFrame,
+        masks: document.querySelectorAll('#detail-content .document-redaction-window').length });
+      return start();
+    };
+    const gate = new Promise(resolve => { window.__releaseFile = resolve; });
+    music.library.file = async track => { await gate; return window.__originalFile(track); };
+    document.querySelector('.read-file[data-action="open"]').click();
+  })()`, false, 20000);
+  await sleep(6000);
+  const waiting = await cdp.evaluate(`({ access:window.rhine.music.access(), state:window.rhine.music.player.state(),
+    masks:document.querySelectorAll('#detail-content .document-redaction-window').length,
+    held:document.querySelector('#detail-content').dataset.revealHeld, three:window.rhine.stats().threeState,
+    starts:window.__startFrames.length, mode:window.rhine.stats().mode })`, false, 20000);
+  check("加载期间保留场景、保持文字黑条且不起播", waiting.access.phase === "loading" && waiting.held === "true" &&
+    waiting.masks > 0 && waiting.three === "on" && waiting.starts === 0 && !waiting.state.playing && waiting.mode === "detail", JSON.stringify(waiting));
+  const waitingShot = await cdp.send("Page.captureScreenshot", { format:"png" });
+  await writeFile(join(SHOTS,"music-loading-masks.png"),Buffer.from(waitingShot.data,"base64"));
+  await cdp.evaluate(`window.rhine.archive(); window.__releaseFile();`, false, 20000);
+  await sleep(800);
+  const cancelled = await cdp.evaluate(`({ phase:window.rhine.music.access().phase, playing:window.rhine.music.player.state().playing,
+    starts:window.__startFrames.length, mode:window.rhine.stats().mode })`, false, 20000);
+  check("返回曲库后旧文件即使完成也不能起播", cancelled.phase === "idle" && !cancelled.playing && cancelled.starts === 0 && cancelled.mode === "archive", JSON.stringify(cancelled));
+  await cdp.evaluate(`window.rhine.music.library.file = async () => { throw Error('Synthetic unavailable file'); };
+    document.querySelector('.read-file[data-action="open"]').click();`, false, 20000);
+  await sleep(800);
+  const failedLoad = await cdp.evaluate(`({ phase:window.rhine.music.access().phase,
+    retry:!document.querySelector('[data-action="retry-music-access"]').hidden,
+    held:document.querySelector('#detail-content').dataset.revealHeld, playing:window.rhine.music.player.state().playing })`, false, 20000);
+  check("加载失败保留黑条并提供重新加载", failedLoad.phase === "error" && failedLoad.retry && failedLoad.held === "true" && !failedLoad.playing, JSON.stringify(failedLoad));
   await cdp.evaluate(
-    `document.querySelector('.read-file[data-action="open"]')?.click()`,
+    `window.rhine.music.library.file = window.__originalFile; document.querySelector('[data-action="retry-music-access"]').click()`,
     false,
     20000,
   );
@@ -598,6 +636,9 @@ try {
     archivePlayback.ok === true && archivePlayback.id === archiveTarget.id,
     JSON.stringify({ archiveTarget, archivePlayback }),
   );
+  const frameStart = await cdp.evaluate(`window.__startFrames`,false,20000);
+  check("文字揭示结束帧只发出一次起播调用", frameStart.length === 1 && frameStart[0].phase === "starting" &&
+    frameStart[0].frame > 0 && frameStart[0].masks === 0, JSON.stringify(frameStart));
   await cdp.evaluate(`window.rhine.archive()`, false, 20000);
   await sleep(700);
   await cdp.send("Emulation.setDeviceMetricsOverride", {
@@ -777,16 +818,16 @@ try {
       true,
       60000,
     );
-  // The library restores lazily (panel open / engine switch). Trigger it here
-  // so the rescan asserts real persistence: stored metadata must be reused for
-  // every unchanged file instead of being re-parsed.
+  // A fresh file selection must be re-read even when size/mtime match another
+  // source. Incremental reuse is safe only on a second scan of that same source.
   const restored = await cdp.evaluate(
     `(async () => {
     await window.rhine.music.library.restore();
     const before = window.rhine.music.library.tracks.length;
     window.rhine.music.library.useFiles(window.__files);
+    const fresh = await window.rhine.music.library.scan(() => {});
     const report = await window.rhine.music.library.scan(() => {});
-    return { before, report: { total: report.total, reused: report.reused, parsed: report.parsed, ms: report.ms } };
+    return { before, fresh: { parsed:fresh.parsed, reused:fresh.reused }, report: { total: report.total, reused: report.reused, parsed: report.parsed, ms: report.ms } };
   })()`,
     true,
     180000,
@@ -795,6 +836,7 @@ try {
   check(
     "二次扫描增量复用（索引持久化）",
     restored.before === FIXTURE_PATHS.length &&
+      restored.fresh.parsed === FIXTURE_PATHS.length && restored.fresh.reused === 0 &&
       restored.report.reused === FIXTURE_PATHS.length &&
       restored.report.parsed === 0,
     JSON.stringify(restored.report),

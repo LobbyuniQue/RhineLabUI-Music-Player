@@ -8,8 +8,8 @@
 // handed to the existing SpectrumEnvelope.
 
 import { SpectrumEnvelope, quietBands, type MusicBands } from "./archive-play-motion";
-
-export type PlayMode = "list" | "single" | "shuffle";
+import { queueIndex, type PlayMode } from "./music-queue.ts";
+export type { PlayMode } from "./music-queue.ts";
 
 export type PlayerTrack = {
   id: string;
@@ -24,6 +24,7 @@ export type PlayerState = {
   id: string | null;
   playing: boolean;
   loading: boolean;
+  prepared: boolean;
   position: number;
   duration: number;
   mode: PlayMode;
@@ -42,6 +43,9 @@ export type MusicPlayerHooks = {
   volume: () => number;
   /** Playback has moved on; the panel uses it to follow the current row. */
   onTrackChange?: (track: PlayerTrack | null) => void;
+  /** Main may own media keys and route them to the selected engine. */
+  mediaSessionActions?: boolean;
+  preparationTimeoutMs?: number;
 };
 
 const BINS = 64;
@@ -88,17 +92,21 @@ export class MusicPlayer {
   private started = 0;
   private active = false;
   private disposed = false;
+  /** Every transport change invalidates continuations from earlier requests. */
+  private playRequest = 0;
+  private prepared = false;
+  private preparationAbort: AbortController | null = null;
 
   constructor(hooks: MusicPlayerHooks) {
     this.hooks = hooks;
     this.volumeValue = hooks.volume();
     const element = document.createElement("audio");
-    element.preload = "metadata";
+    element.preload = "auto";
     element.crossOrigin = "anonymous";
     this.element = element;
     element.addEventListener("ended", this.ended);
     element.addEventListener("error", this.failed);
-    element.addEventListener("loadedmetadata", () => this.emit());
+    element.addEventListener("loadedmetadata", this.metadataLoaded);
   }
 
   state(): PlayerState {
@@ -106,6 +114,7 @@ export class MusicPlayer {
       id: this.current?.id ?? null,
       playing: this.isPlaying(),
       loading: this.loading,
+      prepared: this.prepared,
       position: this.element.currentTime || 0,
       duration: Number.isFinite(this.element.duration) ? this.element.duration : (this.current?.duration ?? 0),
       mode: this.mode,
@@ -140,73 +149,124 @@ export class MusicPlayer {
     this.emit();
   }
 
-  /** Starts a track (and its surrounding queue) from a user gesture. */
-  async play(track: PlayerTrack, options: { position?: number; queueIndex?: number } = {}) {
-    if (this.disposed) return;
+  /** Open only the selected file and buffer it, without calling audio.play(). */
+  async prepare(track: PlayerTrack, options: { position?: number } = {}): Promise<boolean> {
+    if (this.disposed) return false;
+    const request = ++this.playRequest;
+    this.cancelPreparation();
+    const controller = new AbortController();
+    this.preparationAbort = controller;
+    const timer = setTimeout(() => controller.abort(new DOMException("预加载超时", "TimeoutError")), this.hooks.preparationTimeoutMs ?? 15000);
+    // The selected track must never be displayed over the previous audio.
+    this.clearSource();
+    this.active = false;
+    this.hooks.onActiveChange(false);
     this.error = "";
     this.loading = true;
     this.current = track;
     this.hooks.onTrackChange?.(track);
     this.emit();
     try {
-      const file = await this.hooks.resolve(track.id);
-      if (!file) throw new Error("missing");
+      // Unlock synchronously in the user gesture, before file I/O can consume
+      // activation. The media element remains paused throughout preparation.
       this.ensureGraph();
-      await this.context?.resume().catch(() => {});
-      this.releaseUrl();
+      const resumed = this.context!.resume();
+      const [file] = await this.abortable(Promise.all([this.hooks.resolve(track.id), resumed]), controller.signal);
+      if (!this.isCurrentRequest(request)) return false;
+      if (!file) throw new Error("missing");
       this.objectUrl = URL.createObjectURL(file);
       this.element.src = this.objectUrl;
       this.element.load();
+      await this.waitForReady(controller.signal);
+      if (!this.isCurrentRequest(request)) return false;
       if (options.position) this.element.currentTime = options.position;
-      await this.element.play();
+      this.loading = false;
+      this.prepared = true;
+      this.updateMediaSession(track, request);
+      this.emit();
+      return true;
+    } catch (e) {
+      if (!this.isCurrentRequest(request)) return false;
+      this.failPlayback(e instanceof Error && e.message === "missing" ? "文件不可用，可能需要重新授权目录" : e instanceof Error && e.name === "TimeoutError" ? "文件预加载超时，请重试" : "无法准备该文件");
+      return false;
+    } finally {
+      clearTimeout(timer);
+      if (this.preparationAbort === controller) this.preparationAbort = null;
+    }
+  }
+
+  /** Called by the final reveal frame: play is invoked before the first await. */
+  async startPrepared(): Promise<boolean> {
+    if (this.disposed || !this.prepared || !this.current || !this.element.src) return false;
+    const request = this.playRequest;
+    this.prepared = false;
+    try {
+      const started = this.element.play();
+      await started;
+      if (!this.isCurrentRequest(request)) return false;
       this.loading = false;
       this.active = true;
       this.hooks.onActiveChange(true);
-      this.updateMediaSession(track);
       this.emit();
-    } catch (e) {
-      this.loading = false;
-      this.active = false;
-      this.error = e instanceof Error && e.message === "missing" ? "文件不可用，可能需要重新授权目录" : "无法播放该文件";
-      this.hooks.onError?.(this.error);
-      this.emit();
+      return true;
+    } catch {
+      if (this.isCurrentRequest(request)) this.failPlayback("无法开始播放该文件");
+      return false;
+    }
+  }
+
+  async play(track: PlayerTrack, options: { position?: number; queueIndex?: number } = {}) {
+    if (await this.prepare(track, options)) return this.startPrepared();
+    return false;
+  }
+
+  async resume(): Promise<boolean> {
+    if (this.disposed || !this.current) return false;
+    if (!this.element.src) return this.play(this.current);
+    const request = ++this.playRequest;
+    this.cancelPreparation();
+    this.loading = true;
+    this.error = "";
+    this.emit();
+    try {
+      this.ensureGraph();
+      await this.context!.resume();
+      if (!this.isCurrentRequest(request)) return false;
+      this.prepared = true;
+      return this.startPrepared();
+    } catch {
+      if (this.isCurrentRequest(request)) this.failPlayback("无法恢复播放");
+      return false;
     }
   }
 
   async toggle() {
-    if (!this.current) return;
-    if (this.isPlaying()) {
+    if (this.disposed || !this.current) return;
+    if (this.loading || this.isPlaying()) {
       this.pause();
       return;
     }
-    if (this.element.src) {
-      try {
-        this.ensureGraph();
-        await this.context?.resume().catch(() => {});
-        await this.element.play();
-        this.active = true;
-        this.hooks.onActiveChange(true);
-        this.emit();
-        return;
-      } catch {
-        /* fall through to a fresh load */
-      }
-    }
-    await this.play(this.current, { position: this.element.currentTime || 0 });
+    await this.resume();
   }
 
   pause() {
+    if (this.disposed) return;
+    ++this.playRequest;
+    this.cancelPreparation();
     this.element.pause();
+    this.loading = false;
     this.active = false;
     this.hooks.onActiveChange(false);
     this.emit();
   }
 
   stop() {
-    this.element.pause();
-    this.element.removeAttribute("src");
-    this.element.load();
-    this.releaseUrl();
+    if (this.disposed) return;
+    ++this.playRequest;
+    this.cancelPreparation();
+    this.clearSource();
+    this.loading = false;
+    this.error = "";
     this.active = false;
     this.current = null;
     this.hooks.onActiveChange(false);
@@ -232,15 +292,7 @@ export class MusicPlayer {
   async next(step = 1) {
     if (!this.queue.length) return;
     const index = this.current ? this.queue.findIndex((item) => item.id === this.current!.id) : -1;
-    let target: PlayerTrack;
-    if (this.mode === "shuffle" && this.queue.length > 1) {
-      let pick = index;
-      while (pick === index) pick = Math.floor(Math.random() * this.queue.length);
-      target = this.queue[pick];
-    } else {
-      const nextIndex = ((index < 0 ? 0 : index + step) % this.queue.length + this.queue.length) % this.queue.length;
-      target = this.queue[nextIndex];
-    }
+    const target = this.queue[queueIndex(this.queue.length, index, this.mode, step)];
     await this.play(target);
   }
 
@@ -264,25 +316,92 @@ export class MusicPlayer {
   }
 
   dispose() {
+    if (this.disposed) return;
     this.disposed = true;
+    ++this.playRequest;
+    this.cancelPreparation();
+    this.clearSource();
+    this.loading = false;
+    this.active = false;
+    this.current = null;
     this.element.removeEventListener("ended", this.ended);
     this.element.removeEventListener("error", this.failed);
-    this.releaseUrl();
+    this.element.removeEventListener("loadedmetadata", this.metadataLoaded);
     this.source?.disconnect();
     this.gain?.disconnect();
     this.analyser?.disconnect();
-    void this.context?.close();
+    void this.context?.close().catch(() => {});
     this.context = undefined;
+    this.hooks.onActiveChange(false);
     this.hooks.onBands(quietBands());
+    this.hooks.onTrackChange?.(null);
   }
 
   private emit() {
+    if (this.disposed) return;
     this.hooks.onState(this.state());
+  }
+
+  private isCurrentRequest(request: number) {
+    return !this.disposed && request === this.playRequest;
+  }
+
+  private clearSource() {
+    this.element.pause();
+    this.element.removeAttribute("src");
+    this.element.load();
+    this.releaseUrl();
+  }
+
+  private failPlayback(message: string) {
+    ++this.playRequest;
+    this.cancelPreparation();
+    this.clearSource();
+    this.loading = false;
+    this.active = false;
+    this.error = message;
+    this.hooks.onActiveChange(false);
+    this.hooks.onError?.(message);
+    this.emit();
   }
 
   private releaseUrl() {
     if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
     this.objectUrl = null;
+  }
+
+  private cancelPreparation() {
+    this.prepared = false;
+    this.preparationAbort?.abort();
+    this.preparationAbort = null;
+  }
+
+  private abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const aborted = () => { signal.removeEventListener("abort", aborted); reject(signal.reason); };
+      if (signal.aborted) return aborted();
+      signal.addEventListener("abort", aborted, { once: true });
+      promise.then((value) => { signal.removeEventListener("abort", aborted); resolve(value); }, (error) => { signal.removeEventListener("abort", aborted); reject(error); });
+    });
+  }
+
+  private waitForReady(signal: AbortSignal): Promise<void> {
+    if (this.element.readyState >= 3) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        this.element.removeEventListener("canplay", ready);
+        this.element.removeEventListener("error", failed);
+        signal.removeEventListener("abort", aborted);
+      };
+      const ready = () => { if (this.element.readyState >= 3) { cleanup(); resolve(); } };
+      const failed = () => { cleanup(); reject(new Error("media error")); };
+      const aborted = () => { cleanup(); reject(signal.reason); };
+      if (signal.aborted) return aborted();
+      this.element.addEventListener("canplay", ready);
+      this.element.addEventListener("error", failed);
+      signal.addEventListener("abort", aborted, { once: true });
+      ready();
+    });
   }
 
   private ensureGraph() {
@@ -335,7 +454,7 @@ export class MusicPlayer {
     }
   }
 
-  private updateMediaSession(track: PlayerTrack) {
+  private updateMediaSession(track: PlayerTrack, request: number) {
     const session = navigator.mediaSession;
     if (!session || typeof MediaMetadata === "undefined") return;
     const apply = (artwork?: MediaImage[]) => {
@@ -351,10 +470,11 @@ export class MusicPlayer {
       void this.hooks
         .coverUrl(track.id)
         .then((url) => {
-          if (url && this.current?.id === track.id) apply([{ src: url, sizes: "256x256", type: "image/jpeg" }]);
+          if (url && this.isCurrentRequest(request)) apply([{ src: url, sizes: "256x256", type: "image/jpeg" }]);
         })
         .catch(() => {});
     }
+    if (this.hooks.mediaSessionActions === false) return;
     try {
       session.setActionHandler("play", () => void this.toggle());
       session.setActionHandler("pause", () => this.pause());
@@ -368,20 +488,28 @@ export class MusicPlayer {
   }
 
   private ended = () => {
+    if (this.disposed || !this.active || this.loading || !this.current || !this.element.src || !this.element.ended) return;
     if (this.mode === "single") {
+      // Seeking to zero can clear `ended` before `paused` changes. Force the
+      // resume path so toggle cannot interpret this restart as a pause.
+      this.active = false;
       this.element.currentTime = 0;
-      void this.element.play().catch(() => {});
+      void this.toggle();
+      return;
+    }
+    if (!this.queue.length) {
+      this.pause();
       return;
     }
     void this.next();
   };
 
   private failed = () => {
-    if (!this.element.src) return;
-    this.error = "无法读取该文件";
-    this.active = false;
-    this.hooks.onActiveChange(false);
-    this.hooks.onError?.(this.error);
-    this.emit();
+    if (this.disposed || !this.element.src || !this.element.error) return;
+    this.failPlayback("无法读取该文件");
+  };
+
+  private metadataLoaded = () => {
+    if (this.element.src) this.emit();
   };
 }

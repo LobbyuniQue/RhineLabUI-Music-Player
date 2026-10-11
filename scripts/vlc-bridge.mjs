@@ -260,6 +260,14 @@ let vlcInfo = { version: "", startedAt: 0 };
 const vlcUrl = (query = "") => `http://127.0.0.1:${VLC_HTTP_PORT}/requests/status.json${query}`;
 const vlcAuth = "Basic " + Buffer.from(`:${TOKEN}`).toString("base64");
 let current = { id: null, startedAt: 0 };
+let prepared = null;
+let transportRevision = 0;
+let transportTask = Promise.resolve();
+let transportIntent = "stopped";
+let hasStarted = false;
+let desiredVolume = 256;
+let preparationMuted = false;
+const clientSequences = new Map();
 
 async function vlcCall(query = "") {
   const response = await fetch(vlcUrl(query), { headers: { authorization: vlcAuth }, signal: AbortSignal.timeout(8000) });
@@ -286,6 +294,8 @@ function startVlc() {
         "--http-host", "127.0.0.1",
         "--no-video",
         "--no-one-instance",
+        "--start-paused",
+        "--no-repeat", "--no-loop", "--no-random",
         "--no-video-title-show",
         // A music player must win the CPU against a browser rendering a 3D scene;
         // without this VLC can sit in "stopped" for a long time on a busy machine.
@@ -355,33 +365,103 @@ const fileUri = (path) =>
  * the playlist is nudged again. Retrying here is what makes playback reliable
  * from the page, where a second manual click is not an option.
  */
-async function startPlayback() {
+async function startPlayback(revision) {
   // `in_play` only loads the item; VLC reports "playing" once it has opened the
   // file and bound the PCM tap. On a busy machine that takes a moment, and the
   // page shows a loading state meanwhile — so wait instead of nudging the
   // transport, which would fight the asynchronous playlist thread.
-  for (let attempt = 0; attempt < 40; attempt++) {
-    await sleep(attempt === 0 ? 400 : 750);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    assertTransport(revision);
+    await sleep(100);
+    assertTransport(revision);
     const raw = await refreshStatus();
-    if (raw?.state === "playing") return true;
+    assertTransport(revision);
+    if (raw?.state === "playing") { hasStarted = true; return true; }
   }
   return false;
 }
 
-async function play(id) {
+function assertTransport(revision) {
+  if (revision !== transportRevision) throw new Error("superseded transport request");
+}
+
+async function controlledCall(query, revision) {
+  assertTransport(revision);
+  const result = await vlcCall(query);
+  assertTransport(revision);
+  return result;
+}
+
+async function restoreVolume(revision) {
+  // A slider update may arrive while the HTTP volume command is in flight.
+  // Keep preparation muted until the most recent requested volume is applied.
+  let applied;
+  do {
+    applied = desiredVolume;
+    await controlledCall(`?command=volume&val=${applied}`, revision);
+  } while (applied !== desiredVolume);
+  preparationMuted = false;
+}
+
+function serialTransport(url, operation) {
+  const client = url.searchParams.get("client");
+  const sequence = Number(url.searchParams.get("sequence"));
+  if (client !== null) {
+    if (!/^[a-zA-Z0-9-]{1,80}$/.test(client) || !Number.isSafeInteger(sequence) || sequence <= 0)
+      return Promise.reject(new Error("invalid transport sequence"));
+    if (sequence <= (clientSequences.get(client) ?? 0))
+      return Promise.reject(new Error("superseded transport request"));
+    clientSequences.set(client, sequence);
+    if (clientSequences.size > 256) clientSequences.delete(clientSequences.keys().next().value);
+  }
+  const revision = ++transportRevision;
+  const task = transportTask.then(() => { assertTransport(revision); return operation(revision); });
+  transportTask = task.catch(() => {});
+  return task;
+}
+
+async function prepareTrack(id, revision, position = 0) {
   const track = library.find((entry) => entry.id === id);
   if (!track) throw new Error("unknown id");
-  // No pl_stop first: the playlist thread is asynchronous, so a stop issued now
-  // can land after the new input starts and kill it again.
-  current = { id, startedAt: Date.now() };
-  const loaded = await vlcCall(`?command=in_play&input=${encodeURIComponent(fileUri(track.path))}`).catch(
-    (error) => `ERR ${error.message}`,
-  );
-  const started = await startPlayback();
-  console.log(
-    `[bridge] play ${track.name} · in_play=${typeof loaded === "string" ? loaded : loaded?.state} · started=${started}`,
-  );
-  return track;
+  prepared = null;
+  transportIntent = "preparing";
+  hasStarted = false;
+  current = { id, startedAt: 0 };
+  // Muting is a second guard even on VLC versions whose start-paused option
+  // opens output before pausing. No preparation may send audible samples.
+  preparationMuted = true;
+  await controlledCall("?command=volume&val=0", revision);
+  await controlledCall("?command=pl_empty", revision);
+  await controlledCall(`?command=in_play&input=${encodeURIComponent(fileUri(track.path))}&option=start-paused`, revision);
+  let loaded = false;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    assertTransport(revision);
+    const raw = await controlledCall("", revision);
+    if (raw?.state === "playing") await controlledCall("?command=pl_forcepause", revision);
+    if (raw?.state === "paused" && Number(raw.length) > 0) { loaded = true; break; }
+    await sleep(100);
+  }
+  if (!loaded) throw new Error("VLC preparation timed out");
+  await controlledCall(`?command=seek&val=${Math.max(0, position)}`, revision);
+  prepared = { id, ticket: randomUUID(), position: Math.max(0, position) };
+  transportIntent = "ready";
+  await refreshStatus();
+  assertTransport(revision);
+  return { ready: true, prepared: true, id, ticket: prepared.ticket };
+}
+
+async function startPrepared(ticket, revision) {
+  if (!prepared || prepared.ticket !== ticket || transportIntent !== "ready") throw new Error("no matching prepared track");
+  transportIntent = "starting";
+  await restoreVolume(revision);
+  await controlledCall("?command=pl_forceresume", revision);
+  current.startedAt = Date.now();
+  const started = await startPlayback(revision);
+  if (!started) throw new Error("VLC playback timed out");
+  prepared = null;
+  transportIntent = "playing";
+  startTapWatch();
+  return { started: true, status: await status() };
 }
 
 let cachedRaw = null;
@@ -405,7 +485,10 @@ function mapStatus(raw) {
     state,
     time: Number(raw?.time ?? 0),
     length: Number(raw?.length ?? 0),
-    volume: Number(raw?.volume ?? 0),
+    volume: preparationMuted ? desiredVolume : Number(raw?.volume ?? desiredVolume),
+    loading: transportIntent === "preparing" || transportIntent === "starting",
+    prepared: transportIntent === "ready",
+    ended: hasStarted && transportIntent === "playing" && raw?.state === "stopped",
     currentId: current.id,
     title: meta.title ?? "",
     artist: meta.artist ?? "",
@@ -629,34 +712,77 @@ async function handle(req, res) {
     const report = await scan({ rescan: url.searchParams.get("full") === "1" });
     return json(res, 200, { scan: report, tracks: library.length });
   }
-  if (url.pathname === "/api/play") {
+  if (["/api/prepare", "/api/start", "/api/play", "/api/resume", "/api/pause", "/api/stop"].includes(url.pathname)) {
     const id = url.searchParams.get("id");
+    if (["/api/prepare", "/api/play"].includes(url.pathname) && !library.some((track) => track.id === id))
+      return json(res, 400, { error: "unknown id" });
+    // Reject an obsolete/forged ticket before it can invalidate a newer
+    // transport operation or stop a track that has already begun playing.
+    if (url.pathname === "/api/start" && (!prepared || prepared.ticket !== url.searchParams.get("ticket") || transportIntent !== "ready"))
+      return json(res, 409, { error: "no matching prepared track" });
+    const position = Number(url.searchParams.get("position") ?? 0);
+    if (url.pathname === "/api/prepare" && (!Number.isFinite(position) || position < 0))
+      return json(res, 400, { error: "invalid playback position" });
     try {
-      const track = await play(id);
-      startTapWatch();
-      return json(res, 200, { track });
+      const result = await serialTransport(url, async (revision) => {
+        try {
+          if (url.pathname === "/api/prepare") return await prepareTrack(id, revision, position);
+          if (url.pathname === "/api/start") return await startPrepared(url.searchParams.get("ticket"), revision);
+          if (url.pathname === "/api/play") {
+            const ready = await prepareTrack(id, revision);
+            return await startPrepared(ready.ticket, revision);
+          }
+          prepared = null;
+          hasStarted = false;
+          if (url.pathname === "/api/stop") {
+            transportIntent = "stopped";
+            await controlledCall("?command=pl_stop", revision);
+            current = { id: null, startedAt: 0 };
+          } else if (url.pathname === "/api/pause") {
+            transportIntent = "paused";
+            await controlledCall("?command=pl_forcepause", revision);
+          } else {
+            if (!current.id) throw new Error("no current track");
+            transportIntent = "starting";
+            await restoreVolume(revision);
+            await controlledCall("?command=pl_forceresume", revision);
+            if (!await startPlayback(revision)) throw new Error("VLC resume timed out");
+            transportIntent = "playing";
+            return { status: await status() };
+          }
+          // Restore the user's volume only after output has stopped/paused.
+          await restoreVolume(revision);
+          return { status: await status() };
+        } catch (error) {
+          if (revision === transportRevision) {
+            prepared = null;
+            transportIntent = "stopped";
+            hasStarted = false;
+            await vlcCall("?command=pl_stop").catch(() => {});
+            current = { id: null, startedAt: 0 };
+            await vlcCall(`?command=volume&val=${desiredVolume}`).catch(() => {});
+            preparationMuted = false;
+          }
+          throw error;
+        }
+      });
+      return json(res, 200, result);
     } catch (error) {
-      return json(res, 400, { error: String(error.message ?? error) });
+      return json(res, /superseded|matching prepared/.test(String(error.message)) ? 409 : 400, { error: String(error.message ?? error) });
     }
-  }
-  if (url.pathname === "/api/pause") {
-    const state = await status();
-    await vlcCall("?command=pl_pause");
-    return json(res, 200, { state: state.state });
-  }
-  if (url.pathname === "/api/stop") {
-    await vlcCall("?command=pl_stop");
-    current = { id: null, startedAt: 0 };
-    return json(res, 200, { state: "stopped" });
   }
   if (url.pathname === "/api/seek") {
     const seconds = Number(url.searchParams.get("seconds") ?? 0);
+    if (!Number.isFinite(seconds)) return json(res, 400, { error: "invalid playback position" });
     await vlcCall(`?command=seek&val=${encodeURIComponent(String(Math.max(0, seconds)))}`);
     return json(res, 200, await status());
   }
   if (url.pathname === "/api/volume") {
-    const value = Math.max(0, Math.min(512, Number(url.searchParams.get("value") ?? 256)));
-    await vlcCall(`?command=volume&val=${Math.round(value)}`);
+    const requested = Number(url.searchParams.get("value") ?? 256);
+    if (!Number.isFinite(requested)) return json(res, 400, { error: "invalid volume" });
+    const value = Math.max(0, Math.min(512, requested));
+    desiredVolume = Math.round(value);
+    if (!preparationMuted) await vlcCall(`?command=volume&val=${desiredVolume}`);
     return json(res, 200, await status());
   }
   if (url.pathname === "/api/status") return json(res, 200, await status());
@@ -665,7 +791,7 @@ async function handle(req, res) {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
     });
-    return res.end(JSON.stringify({ bands: Array.from(spectrum) }));
+    return res.end(JSON.stringify({ bands: Array.from(preparationMuted ? new Float32Array(128) : spectrum) }));
   }
   if (url.pathname === "/api/spectrum") {
     res.writeHead(200, {
@@ -684,7 +810,7 @@ async function handle(req, res) {
 
 setInterval(() => {
   if (!clients.size) return;
-  const payload = `data: ${JSON.stringify({ bands: Array.from(spectrum), tap: tapActive })}\n\n`;
+  const payload = `data: ${JSON.stringify({ bands: Array.from(preparationMuted ? new Float32Array(128) : spectrum), tap: tapActive })}\n\n`;
   for (const client of clients) client.write(payload);
 }, 40);
 

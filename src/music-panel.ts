@@ -6,8 +6,8 @@
 
 import { escapeHtml } from "./html";
 import type { Sound } from "./audio";
-import { MusicSearchIndex, formatDuration, formatLibrarySize, matchSegments, tokenize, type SearchField } from "./music-search";
-import type { LibraryTrack, MusicLibrary, ScanProgress } from "./music-library";
+import { formatDuration, formatLibrarySize, matchSegments, tokenize, type SearchField } from "./music-search";
+import type { CoverLease, LibraryTrack, MusicLibrary, ScanProgress } from "./music-library";
 import type { MusicPlayer, PlayMode } from "./music-player";
 import type { BridgeScan, BridgeStatus, BridgeTrack } from "./music-bridge";
 import { directoryPickerSupported } from "./music-source";
@@ -19,6 +19,12 @@ export type MusicPanelHost = {
   bridge: {
     connected: boolean;
     play(id: string): Promise<unknown>;
+    resume(): Promise<unknown>;
+    queueTracks(tracks: readonly { id: string }[]): void;
+    setMode(mode: PlayMode): void;
+    mode(): PlayMode;
+    next(): Promise<unknown>;
+    previous(): Promise<unknown>;
     pause(): Promise<unknown>;
     stop(): Promise<unknown>;
     seek(seconds: number): Promise<unknown>;
@@ -28,6 +34,8 @@ export type MusicPanelHost = {
     rescan(full?: boolean): Promise<BridgeScan | null>;
   };
   engine: () => "browser" | "vlc";
+  canControl?: () => boolean;
+  beforePlayback?: () => Promise<void> | void;
   onSound: (sound: Sound, pan?: number) => void;
   onNotify: (message: string) => void;
   onOpenSettings: () => void;
@@ -49,6 +57,7 @@ const MODE_LABELS: Record<PlayMode, string> = {
 };
 
 const MODE_ORDER: PlayMode[] = ["list", "single", "shuffle"];
+const RESULT_PAGE_SIZE = 240;
 
 const CODE_LABELS: Record<string, string> = {
   mp3: "MP3",
@@ -68,9 +77,11 @@ export class MusicPanel {
   /** Keyboard cursor; -1 keeps the list neutral until an arrow key is used. */
   private cursor = -1;
   private results: LibraryTrack[] = [];
-  private index = new MusicSearchIndex<LibraryTrack>([]);
+  private visibleResults = RESULT_PAGE_SIZE;
+  private resultScope = "";
   private scanText = "";
   private scanAbort: AbortController | null = null;
+  private libraryRequest = 0;
   private lastPosition = -1;
   private lastTitle = "";
   private lastStatus = "";
@@ -82,6 +93,10 @@ export class MusicPanel {
   private bridgePending = false;
   /** Playing row the list currently highlights; guards idempotent re-sync. */
   private lastPlayingId: string | null = null;
+  private playbackRequest = 0;
+  private lastEngineState = "";
+  private coverRequest = 0;
+  private coverLease: CoverLease | null = null;
 
   constructor() {}
 
@@ -90,6 +105,7 @@ export class MusicPanel {
   }
 
   attach(host: MusicPanelHost) {
+    this.cancelPending();
     this.host = host;
   }
 
@@ -99,22 +115,54 @@ export class MusicPanel {
     this.controller?.abort();
     this.controller = new AbortController();
     this.mounted = true;
+    this.resetCover();
+    this.lastPosition = -1;
+    this.lastTitle = "";
+    this.lastStatus = "";
+    this.lastEngineState = `${this.host.engine()}:${this.host.bridge.connected}:${this.canControl}`;
     this.lastPlayingId = null;
     root.innerHTML = this.markup();
     this.bind(root, this.controller.signal);
     this.refreshIndex();
     this.renderAll();
-    if (!this.host.library.tracks.length) this.autoRestore();
+    if (!this.usingBridge && !this.host.library.tracks.length) void this.autoRestore();
   }
 
   unmount() {
+    this.cancelPending();
+    this.resetCover();
     this.controller?.abort();
     this.controller = null;
-    this.scanAbort?.abort();
-    this.scanAbort = null;
     this.mounted = false;
     this.root = null;
     this.lastPlayingId = null;
+  }
+
+  /** Invalidates asynchronous panel work before an engine or source changes. */
+  cancelPending() {
+    ++this.playbackRequest;
+    ++this.libraryRequest;
+    this.scanAbort?.abort();
+    this.scanAbort = null;
+    this.scanText = "";
+    this.bridgePending = false;
+    this.host?.library.cancelScan();
+  }
+
+  private get canControl() { return this.host.canControl?.() ?? true; }
+
+  private currentPlaybackRequest(request: number, engine: "browser" | "vlc") {
+    return request === this.playbackRequest && this.host.engine() === engine && this.canControl;
+  }
+
+  private currentLibraryRequest(request: number, engine: "browser" | "vlc") {
+    return request === this.libraryRequest && this.host.engine() === engine && this.canControl;
+  }
+
+  private queueResults() {
+    const tracks = this.results.length ? this.results : this.library.tracks;
+    this.player.queueTracks(tracks);
+    this.host.bridge.queueTracks(tracks);
   }
 
   /** Called from the app frame loop. The player itself ticks from the same
@@ -122,13 +170,21 @@ export class MusicPanel {
    * analyser that drives the archive music reaction. */
   tick(dt: number) {
     if (!this.mounted) return;
+    const engineState = `${this.host.engine()}:${this.host.bridge.connected}:${this.canControl}`;
+    if (engineState !== this.lastEngineState) {
+      this.lastEngineState = engineState;
+      ++this.playbackRequest;
+      this.bridgePending = false;
+      this.renderStatus();
+      this.renderBar();
+    }
     // Track changes can arrive without a panel gesture (MediaSession keys,
     // browser-engine next/previous); keep the highlight and bar in step.
     this.syncPlayingRow(this.activeId());
     if (this.usingBridge) {
       // The bridge plays through VLC; the page only mirrors its transport state.
       this.bridgeAccumulator += dt;
-      if (this.bridgeAccumulator > 1 && !this.bridgeBusy) {
+      if (this.host.bridge.connected && this.bridgeAccumulator > 1 && !this.bridgeBusy) {
         this.bridgeAccumulator = 0;
         void this.pollBridge();
       }
@@ -140,19 +196,22 @@ export class MusicPanel {
 
   /** True when playback is delegated to the local VLC bridge. */
   private get usingBridge() {
-    return this.host.engine() === "vlc" && this.host.bridge.connected;
+    return this.host.engine() === "vlc";
   }
 
   /** The track the UI marks as playing, whichever engine owns it. */
   private activeId(): string | null {
-    if (this.usingBridge) return this.bridgeStatus?.currentId ?? null;
+    if (this.usingBridge) return this.host.bridge.connected ? this.bridgeStatus?.currentId ?? null : null;
     return this.player.state().id;
   }
 
   private async pollBridge() {
+    if (!this.usingBridge || !this.host.bridge.connected) return;
+    const request = this.playbackRequest;
     this.bridgeBusy = true;
     try {
       const status = await this.host.bridge.status();
+      if (!this.currentBridgeRequest(request)) return;
       this.bridgeStatus = status;
       if (status) {
         // VLC opens the file (and the PCM tap) asynchronously; the pending flag
@@ -172,6 +231,7 @@ export class MusicPanel {
 
   /** Re-renders after the library was replaced from outside (bridge or rescan). */
   refreshLibrary() {
+    this.resetCover();
     this.refreshIndex();
     this.cursor = -1;
     if (this.mounted) this.renderAll();
@@ -185,10 +245,10 @@ export class MusicPanel {
     // filters, result header/rows, empty state, modal bottom) so the two search
     // surfaces read as the same interface.
     return `
-<div class="search-field"><span>⌕</span><input id="music-search" type="search" autocomplete="off" placeholder="输入曲目、艺术家或专辑" aria-label="检索本地音乐"/><span class="key">ESC</span></div>
+<div class="search-field"><span>⌕</span><input id="music-search" type="search" autocomplete="off" value="${escapeHtml(this.query)}" placeholder="输入曲目、艺术家或专辑" aria-label="检索本地音乐"/><span class="key">ESC</span></div>
 <div class="category-filters music-filters" role="group" aria-label="检索范围">${FIELD_LABELS.map(
-      (item, index) =>
-        `<button data-music-field="${item.field}" class="${index === 0 ? "active" : ""}">${item.label}</button>`,
+      (item) =>
+        `<button data-music-field="${item.field}" class="${item.field === this.field ? "active" : ""}">${item.label}</button>`,
     ).join("")}<span class="music-tools"><button data-music="pick">${pickerSupported ? "选择目录" : "选择文件"}</button><button data-music="scan" disabled>重新扫描</button></span></div>
 <div class="music-status" id="music-status" role="status"></div>
 <div class="result-header"><span>TRACK / 曲目</span><span>FORMAT / 格式</span><span>TIME / 时长</span></div>
@@ -242,7 +302,7 @@ export class MusicPanel {
           this.moveCursor(-1);
         } else if (key === "Enter") {
           event.preventDefault();
-          this.playCursor();
+          void this.playCursor().catch((error) => this.playbackFailed(error));
         }
       },
       { signal },
@@ -264,12 +324,12 @@ export class MusicPanel {
         if (trackButton) {
           const index = Number(trackButton.dataset.musicIndex ?? "0");
           this.cursor = index;
-          void this.playCursor();
+          void this.playCursor().catch((error) => this.playbackFailed(error));
           return;
         }
         const action = target.closest<HTMLElement>("[data-music]")?.dataset.music;
         if (!action) return;
-        void this.runAction(action);
+        void this.runAction(action).catch((error) => this.playbackFailed(error));
       },
       { signal },
     );
@@ -277,9 +337,10 @@ export class MusicPanel {
     root.querySelector<HTMLInputElement>("#music-volume")?.addEventListener(
       "input",
       (event) => {
+        if (!this.canControl) return;
         const value = Number((event.target as HTMLInputElement).value) / 100;
         this.player.setVolume(value);
-        if (this.usingBridge) void this.host.bridge.volume(value).then(() => this.pollBridge());
+        if (this.usingBridge) void this.host.bridge.volume(value).then(() => this.pollBridge()).catch((error) => this.playbackFailed(error));
         this.host.onVolumeChange?.(value);
       },
       { signal },
@@ -287,12 +348,13 @@ export class MusicPanel {
 
     const seek = root.querySelector<HTMLElement>("#music-seek");
     const scrub = (event: PointerEvent) => {
+      if (!this.canControl) return;
       const rect = seek!.getBoundingClientRect();
       if (rect.width <= 0) return;
       const ratio = (event.clientX - rect.left) / rect.width;
       if (this.usingBridge) {
         const length = this.bridgeStatus?.length ?? 0;
-        if (length > 0) void this.host.bridge.seek(ratio * length).then(() => this.pollBridge());
+        if (length > 0) void this.host.bridge.seek(ratio * length).then(() => this.pollBridge()).catch((error) => this.playbackFailed(error));
       } else {
         this.player.seek(ratio);
       }
@@ -312,12 +374,13 @@ export class MusicPanel {
     seek?.addEventListener(
       "keydown",
       (event) => {
+        if (!this.canControl) return;
         const key = (event as KeyboardEvent).key;
         if (key === "ArrowLeft" || key === "ArrowRight") {
           const delta = key === "ArrowLeft" ? -5 : 5;
           if (this.usingBridge) {
             const target = Math.max(0, (this.bridgeStatus?.time ?? 0) + delta);
-            void this.host.bridge.seek(target).then(() => this.pollBridge());
+            void this.host.bridge.seek(target).then(() => this.pollBridge()).catch((error) => this.playbackFailed(error));
           } else {
             this.player.seekBy(delta);
           }
@@ -332,9 +395,10 @@ export class MusicPanel {
       "change",
       (event) => {
         const files = (event.target as HTMLInputElement).files;
-        if (!files || !files.length || !this.host) return;
+        if (!files || !files.length || !this.host || !this.canControl || this.usingBridge) return;
+        this.cancelPending();
         this.host.library.useFiles(files);
-        void this.startScan();
+        void this.startScan().catch((error) => this.playbackFailed(error));
       },
       { signal },
     );
@@ -349,6 +413,7 @@ export class MusicPanel {
   }
 
   private async runAction(action: string) {
+    if (!this.canControl && action !== "reset-search" && action !== "more") return;
     switch (action) {
       case "toggle":
         this.host.onSound("ui-tick");
@@ -356,17 +421,32 @@ export class MusicPanel {
         break;
       case "next":
         this.host.onSound("column");
-        await this.step(-1);
+        await this.step(1);
         break;
       case "prev":
         this.host.onSound("column");
-        await this.step(1);
+        await this.step(-1);
         break;
       case "mode": {
-        const next = MODE_ORDER[(MODE_ORDER.indexOf(this.player.state().mode) + 1) % MODE_ORDER.length];
+        const mode = this.usingBridge ? this.host.bridge.mode() : this.player.state().mode;
+        const next = MODE_ORDER[(MODE_ORDER.indexOf(mode) + 1) % MODE_ORDER.length];
         this.player.setMode(next);
+        this.host.bridge.setMode(next);
         this.host.onSound("ui-tick");
         this.host.onNotify(`播放模式：${MODE_LABELS[next]}`);
+        this.renderBar();
+        break;
+      }
+      case "more": {
+        const list = this.root?.querySelector<HTMLElement>("#music-results");
+        const scrollTop = list?.scrollTop ?? 0;
+        const firstNew = this.visibleResults;
+        this.visibleResults += RESULT_PAGE_SIZE;
+        this.renderResults();
+        if (list) {
+          list.scrollTop = scrollTop;
+          list.querySelector<HTMLElement>(`[data-music-index="${firstNew}"]`)?.focus({ preventScroll: true });
+        }
         break;
       }
       case "pick":
@@ -396,58 +476,104 @@ export class MusicPanel {
 
   /** Play/pause, routed to whichever engine is active. */
   private async togglePlayback() {
-    if (!this.usingBridge) {
-      await this.player.toggle();
+    if (!this.canControl || (this.usingBridge && !this.bridgeAvailable())) return;
+    const engine = this.host.engine();
+    const request = ++this.playbackRequest;
+    await this.host.beforePlayback?.();
+    if (!this.currentPlaybackRequest(request, engine)) return;
+    this.queueResults();
+    if (engine === "browser") {
+      if (this.player.currentTrack()) await this.player.toggle();
+      else {
+        const track = this.results[this.cursor] ?? this.results[0] ?? this.library.tracks[0];
+        if (track) await this.player.play(track);
+      }
+      if (this.currentPlaybackRequest(request, engine)) this.renderBar();
       return;
     }
     const current = this.bridgeStatus;
     if (current?.state === "playing") {
-      this.bridgeStatus = await this.host.bridge.pause().then(() => this.host.bridge.status());
+      await this.host.bridge.pause();
+    } else if (current?.state === "paused" && current.currentId) {
+      await this.host.bridge.resume();
+    } else {
+      const id = this.results[this.cursor]?.id ?? current?.currentId ?? this.library.tracks[0]?.id;
+      if (!id) return;
+      this.bridgePending = true;
       this.renderBar();
-      return;
-    }
-    const id = current?.currentId ?? this.results[this.cursor]?.id ?? this.library.tracks[0]?.id;
-    if (id) {
       await this.host.bridge.play(id);
-      this.bridgeStatus = await this.host.bridge.status();
-      this.renderBar();
-      this.syncPlayingRow(id);
     }
+    if (!this.currentBridgeRequest(request)) return;
+    this.bridgePending = false;
+    await this.pollBridge();
   }
 
-  /**
-   * Moves through the visible results. VLC has no queue the page can reorder, so
-   * the direction is resolved here and handed to the bridge as a single play.
-   */
+  /** Both engines receive the full search queue, including rows not rendered yet. */
   private async step(direction: 1 | -1) {
-    if (!this.usingBridge) {
+    if (!this.canControl || (this.usingBridge && !this.bridgeAvailable())) return;
+    const engine = this.host.engine();
+    const request = ++this.playbackRequest;
+    await this.host.beforePlayback?.();
+    if (!this.currentPlaybackRequest(request, engine)) return;
+    this.queueResults();
+    if (engine === "browser") {
       await (direction === 1 ? this.player.next() : this.player.previous());
       return;
     }
-    const list = this.results.length ? this.results : this.library.tracks;
-    if (!list.length) return;
-    const currentId = this.bridgeStatus?.currentId ?? null;
-    const index = currentId ? list.findIndex((track) => track.id === currentId) : -1;
-    const nextIndex = ((index < 0 ? 0 : index + direction) % list.length + list.length) % list.length;
-    const target = list[nextIndex];
-    await this.host.bridge.play(target.id);
-    this.bridgeStatus = await this.host.bridge.status();
-    this.cursor = nextIndex;
-    this.renderResults();
+    this.bridgePending = true;
     this.renderBar();
-    this.syncPlayingRow(target.id);
+    await (direction === 1 ? this.host.bridge.next() : this.host.bridge.previous());
+    if (!this.currentBridgeRequest(request)) return;
+    this.bridgePending = false;
+    await this.pollBridge();
+  }
+
+  private currentBridgeRequest(request: number) {
+    return this.currentPlaybackRequest(request, "vlc") && this.host.bridge.connected;
+  }
+
+  private bridgeAvailable() {
+    if (this.host.bridge.connected) return true;
+    this.bridgePending = false;
+    this.host.onNotify("VLC 桥接已断线，正在等待重连");
+    this.renderStatus();
+    this.renderBar();
+    return false;
+  }
+
+  private playbackFailed(error: unknown) {
+    this.bridgePending = false;
+    this.host.onNotify(error instanceof Error ? error.message : "播放操作失败");
+    this.renderStatus();
+    this.renderBar();
+  }
+
+  private bridgePlaybackState() {
+    const status = this.bridgeStatus;
+    return this.host.bridge.connected && status
+      ? status
+      : { state: "offline" as const, currentId: status?.currentId ?? null, time: status?.time ?? 0, length: status?.length ?? 0 };
   }
 
   private async pickSource() {
+    if (!this.canControl) return;
+    if (this.usingBridge) {
+      this.host.onOpenSettings();
+      return;
+    }
+    this.cancelPending();
+    const request = this.libraryRequest;
     if (!directoryPickerSupported()) {
       this.root?.querySelector<HTMLInputElement>("#music-files")?.click();
       return;
     }
     try {
       this.host.onSound("page-open");
-      await this.library.pick();
+      const picked = await this.library.pick();
+      if (!picked || !this.currentLibraryRequest(request, "browser")) return;
       await this.startScan();
     } catch (e) {
+      if (!this.currentLibraryRequest(request, "browser")) return;
       const message = e instanceof Error && e.message === "permission" ? "目录权限被拒绝，无法读取曲库" : "已取消选择目录";
       this.host.onNotify(message);
       this.renderStatus();
@@ -455,7 +581,14 @@ export class MusicPanel {
   }
 
   async startScan() {
+    if (!this.canControl) return;
+    this.scanAbort?.abort();
+    this.library.cancelScan();
+    const request = ++this.libraryRequest;
+    const engine = this.host.engine();
+    const current = () => this.currentLibraryRequest(request, engine);
     if (this.usingBridge) {
+      if (!this.bridgeAvailable()) return;
       // The bridge owns the folder; ask it to rescan and re-read the catalogue.
       this.host.onSound("scan");
       this.scanText = "VLC 桥接正在重新扫描…";
@@ -463,11 +596,14 @@ export class MusicPanel {
       this.renderStatus();
       try {
         const report = await this.host.bridge.rescan();
+        if (!current() || !this.host.bridge.connected) return;
+        if (!report) throw new Error("scan failed");
         const tracks = await this.host.bridge.library();
+        if (!current() || !this.host.bridge.connected) return;
         this.library.useBridgeTracks(tracks, this.library.label);
+        this.host.bridge.queueTracks(tracks);
         this.scanText = "";
-        this.refreshIndex();
-        this.renderAll();
+        this.refreshLibrary();
         this.host.onLibraryChanged?.();
         this.host.onNotify(
           report
@@ -476,6 +612,7 @@ export class MusicPanel {
         );
         this.host.onSound("confirm");
       } catch {
+        if (!current()) return;
         this.scanText = "";
         this.renderStatus();
         this.host.onNotify("VLC 桥接重新扫描失败");
@@ -486,20 +623,28 @@ export class MusicPanel {
       await this.pickSource();
       return;
     }
-    this.scanAbort?.abort();
     const controller = new AbortController();
     this.scanAbort = controller;
     this.host.onSound("scan");
     this.scanText = "正在读取目录…";
     this.renderStatus();
-    const report = await this.library.scan((progress) => this.renderScanProgress(progress), {
-      signal: controller.signal,
-    });
-    this.scanAbort = null;
-    this.scanText = "";
-    this.refreshIndex();
-    this.cursor = -1;
-    this.renderAll();
+    let report;
+    try {
+      report = await this.library.scan((progress) => {
+        if (current() && !controller.signal.aborted) this.renderScanProgress(progress);
+      }, { signal: controller.signal });
+    } catch (error) {
+      if (current() && !controller.signal.aborted) this.host.onNotify(error instanceof Error ? error.message : "扫描失败");
+      return;
+    } finally {
+      if (current()) {
+        this.scanAbort = null;
+        this.scanText = "";
+        this.renderStatus();
+      }
+    }
+    if (!current() || controller.signal.aborted || report.phase === "cancelled") return;
+    this.refreshLibrary();
     this.host.onLibraryChanged?.();
     if (report.phase === "error") {
       this.host.onNotify("扫描中断，已保留原有曲库");
@@ -516,6 +661,7 @@ export class MusicPanel {
   }
 
   private async autoRestore() {
+    if (this.usingBridge || !this.canControl) return;
     if (this.library.source) {
       this.renderStatus();
       return;
@@ -523,12 +669,18 @@ export class MusicPanel {
     // A remembered directory handle is reopened without a picker; the browser
     // still needs a gesture to grant read permission again, which the panel
     // offers through the "恢复曲库" button.
-    await this.library.restore().catch(() => false);
-    this.renderStatus();
+    const request = ++this.libraryRequest;
+    const restored = await this.library.restore().catch(() => false);
+    if (!this.currentLibraryRequest(request, "browser")) return;
+    if (restored) {
+      this.refreshLibrary();
+      this.host.onLibraryChanged?.();
+    } else this.renderStatus();
   }
 
   private refreshIndex() {
-    this.index = new MusicSearchIndex<LibraryTrack>(this.library.tracks);
+    this.visibleResults = RESULT_PAGE_SIZE;
+    this.resultScope = "";
     this.renderResults();
   }
 
@@ -544,9 +696,16 @@ export class MusicPanel {
   private renderResults() {
     const list = this.root?.querySelector<HTMLElement>("#music-results");
     if (!list) return;
+    const scope = `${this.field}\n${this.query}`;
+    if (scope !== this.resultScope) {
+      this.resultScope = scope;
+      this.visibleResults = RESULT_PAGE_SIZE;
+      this.cursor = -1;
+    }
     const tracks = this.library.search(this.query, this.field);
     this.results = tracks;
     if (this.cursor >= tracks.length) this.cursor = Math.max(0, tracks.length - 1);
+    if (this.cursor >= this.visibleResults) this.visibleResults = Math.ceil((this.cursor + 1) / RESULT_PAGE_SIZE) * RESULT_PAGE_SIZE;
     const terms = tokenize(this.query);
     const playingId = this.activeId();
     this.renderCount(tracks.length);
@@ -566,7 +725,7 @@ export class MusicPanel {
       matchSegments(text, terms)
         .map((segment) => (segment.hit ? `<mark>${escapeHtml(segment.text)}</mark>` : escapeHtml(segment.text)))
         .join("");
-    list.innerHTML = tracks
+    list.innerHTML = tracks.slice(0, this.visibleResults)
       .map((track, index) => {
         const classes = [
           "result-row",
@@ -585,12 +744,14 @@ export class MusicPanel {
   <span><span>${track.missing ? "文件失效" : formatDuration(track.duration)}</span><i>${glyph}</i></span>
 </button>`;
       })
-      .join("");
+      .join("") + (tracks.length > this.visibleResults
+        ? `<button class="music-more" data-music="more">继续显示 ${Math.min(RESULT_PAGE_SIZE, tracks.length - this.visibleResults)} 首（共 ${tracks.length} 首） ↓</button>`
+        : "");
   }
 
   private renderCount(count: number) {
     const node = this.root?.querySelector<HTMLElement>("#music-result-count");
-    if (node) node.textContent = `${String(count).padStart(2, "0")} TRACKS FOUND`;
+    if (node) node.textContent = `${String(count).padStart(2, "0")} TRACKS FOUND${count > this.visibleResults ? ` · 已显示 ${this.visibleResults}` : ""}`;
   }
 
   private renderStatus(progress?: ScanProgress) {
@@ -612,17 +773,18 @@ export class MusicPanel {
           stats.missing ? `${stats.missing} 首失效` : "",
         ].filter(Boolean);
     const html = `<span title="${escapeHtml(label)}">${escapeHtml(parts.join(" · "))}</span>`;
-    if (html === this.lastStatus) return;
-    this.lastStatus = html;
-    node.innerHTML = html;
+    if (html !== this.lastStatus) {
+      this.lastStatus = html;
+      node.innerHTML = html;
+    }
 
     const engine = this.root?.querySelector<HTMLElement>("#music-engine-label");
     const live = this.usingBridge ? this.host.bridge.connected : Boolean(this.library.source);
     if (engine) {
-      engine.innerHTML = `${this.usingBridge ? "VLC 内核" : "浏览器内核"} <i>●</i> ${live ? "CONNECTED" : "STANDBY"}`;
+      engine.innerHTML = `${this.usingBridge ? "VLC 内核" : "浏览器内核"} <i>●</i> ${live ? "CONNECTED" : this.usingBridge ? "OFFLINE / 等待重连" : "STANDBY"}`;
     }
     const scanButton = this.root?.querySelector<HTMLElement>('[data-music="scan"]');
-    if (scanButton) scanButton.toggleAttribute("disabled", !live);
+    if (scanButton) scanButton.toggleAttribute("disabled", !live || !this.canControl);
   }
 
   private renderScanProgress(progress: ScanProgress) {
@@ -650,14 +812,14 @@ export class MusicPanel {
     const bar = this.root?.querySelector<HTMLElement>("#music-bar");
     if (!bar) return;
     const playerState = this.player.state();
-    const bridgeState = this.usingBridge ? this.bridgeStatus : null;
+    const bridgeState = this.usingBridge ? this.bridgePlaybackState() : null;
     const state = bridgeState
       ? {
           id: bridgeState.currentId,
           playing: bridgeState.state === "playing",
           position: bridgeState.time,
           duration: bridgeState.length,
-          mode: playerState.mode,
+          mode: this.host.bridge.mode(),
           error: bridgeState.state === "offline" ? "VLC 未响应" : "",
           loading: this.bridgePending && bridgeState.state !== "playing",
         }
@@ -704,7 +866,12 @@ export class MusicPanel {
     if (!node || !this.host) return;
     const key = id ?? "";
     if (node.dataset.coverFor === key) return;
+    const request = ++this.coverRequest;
+    this.coverLease?.release();
+    this.coverLease = null;
     node.dataset.coverFor = key;
+    node.style.backgroundImage = "";
+    node.classList.remove("has-cover");
     if (!id) {
       node.style.backgroundImage = "";
       node.classList.remove("has-cover");
@@ -712,10 +879,14 @@ export class MusicPanel {
     }
     const track = this.library.tracks.find((item) => item.id === id);
     if (!track) return;
-    const url = await this.library.coverUrl(track).catch(() => null);
-    if (node.dataset.coverFor !== key) return;
-    if (url) {
-      node.style.backgroundImage = `url("${url}")`;
+    const lease = await this.library.acquireCover(track).catch(() => null);
+    if (request !== this.coverRequest || node.dataset.coverFor !== key) {
+      lease?.release();
+      return;
+    }
+    if (lease) {
+      this.coverLease = lease;
+      node.style.backgroundImage = `url("${lease.url}")`;
       node.classList.add("has-cover");
     } else {
       node.style.backgroundImage = "";
@@ -723,9 +894,20 @@ export class MusicPanel {
     }
   }
 
+  private resetCover() {
+    ++this.coverRequest;
+    this.coverLease?.release();
+    this.coverLease = null;
+    const node = this.root?.querySelector<HTMLElement>("#music-cover");
+    if (!node) return;
+    delete node.dataset.coverFor;
+    node.style.backgroundImage = "";
+    node.classList.remove("has-cover");
+  }
+
   private renderTimeline() {
     if (!this.mounted) return;
-    const bridgeState = this.usingBridge ? this.bridgeStatus : null;
+    const bridgeState = this.usingBridge ? this.bridgePlaybackState() : null;
     const playerState = this.player.state();
     const state = bridgeState
       ? { position: bridgeState.time, duration: bridgeState.length, playing: bridgeState.state === "playing" }
@@ -759,6 +941,10 @@ export class MusicPanel {
     if (trackId) {
       const index = this.results.findIndex((track) => track.id === trackId);
       if (index >= 0) {
+        if (index >= this.visibleResults) {
+          this.visibleResults = Math.ceil((index + 1) / RESULT_PAGE_SIZE) * RESULT_PAGE_SIZE;
+          this.renderResults();
+        }
         const row = list.querySelector<HTMLElement>(`.result-row[data-music-index="${index}"]`);
         row?.classList.add("playing");
         if (changed) row?.scrollIntoView({ block: "nearest" });
@@ -777,30 +963,32 @@ export class MusicPanel {
   }
 
   private async playCursor() {
+    if (!this.canControl || (this.usingBridge && !this.bridgeAvailable())) return;
     const track = this.results[this.cursor] ?? this.results[0];
     if (!track) return;
+    const engine = this.host.engine();
+    const request = ++this.playbackRequest;
+    await this.host.beforePlayback?.();
+    if (!this.currentPlaybackRequest(request, engine)) return;
+    this.queueResults();
     this.host.onSound("open");
-    if (this.usingBridge && track.bridge) {
+    if (this.usingBridge) {
+      if (!track.bridge) return;
       // VLC owns the file; the page only sends the id from its own catalogue.
       this.bridgePending = true;
+      this.renderBar();
       await this.host.bridge.play(track.id);
+      if (!this.currentBridgeRequest(request)) return;
+      this.bridgePending = false;
       this.bridgeAccumulator = 0;
       await this.pollBridge();
+      if (!this.currentBridgeRequest(request)) return;
       this.renderBar();
       this.syncPlayingRow(track.id);
       return;
     }
-    this.player.queueTracks(
-      (this.results.length ? this.results : this.library.tracks).map((item) => ({
-        id: item.id,
-        title: item.title,
-        artist: item.artist,
-        album: item.album,
-        duration: item.duration,
-        codec: item.codec,
-      })),
-    );
     await this.player.play(track);
+    if (!this.currentPlaybackRequest(request, engine) || this.player.currentTrack()?.id !== track.id) return;
     this.renderBar();
     this.syncPlayingRow(track.id);
   }

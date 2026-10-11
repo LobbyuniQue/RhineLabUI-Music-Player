@@ -53,6 +53,21 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
   });
 }
 
+function checkCancelled(signal?: AbortSignal) {
+  if (signal?.aborted) throw new DOMException("Library operation cancelled", "AbortError");
+}
+
+async function finishTransaction(tx: IDBTransaction, signal?: AbortSignal): Promise<void> {
+  const abort = () => { try { tx.abort(); } catch { /* already complete */ } };
+  signal?.addEventListener("abort", abort, { once: true });
+  try {
+    if (signal?.aborted) abort();
+    await transactionDone(tx);
+  } finally {
+    signal?.removeEventListener("abort", abort);
+  }
+}
+
 export class MusicStore {
   private db: IDBDatabase | null = null;
   private memory: {
@@ -96,15 +111,19 @@ export class MusicStore {
     return [...this.memory.tracks.values()];
   }
 
-  async putTracks(tracks: readonly StoredTrack[]): Promise<void> {
+  async putTracks(tracks: readonly StoredTrack[], signal?: AbortSignal): Promise<void> {
     if (!tracks.length) return;
-    if (await this.open()) {
+    checkCancelled(signal);
+    const persistent = await this.open();
+    checkCancelled(signal);
+    if (persistent) {
       const tx = this.db!.transaction(TRACKS, "readwrite");
       const store = tx.objectStore(TRACKS);
       for (const track of tracks) store.put(track);
-      await transactionDone(tx);
+      await finishTransaction(tx, signal);
       return;
     }
+    checkCancelled(signal);
     for (const track of tracks) this.memory.tracks.set(track.id, track);
   }
 
@@ -151,14 +170,47 @@ export class MusicStore {
     for (const id of ids) this.memory.covers.delete(id);
   }
 
-  async putRoot(root: StoredRoot): Promise<void> {
-    if (await this.open()) {
+  /** Replace one complete scan atomically. Cancellation aborts the IndexedDB
+   * transaction; the memory fallback publishes both maps in one synchronous step. */
+  async commitScan(tracks: readonly StoredTrack[], covers: readonly { id: string; blob: Blob }[],
+    options: { signal?: AbortSignal } = {}): Promise<void> {
+    const { signal } = options;
+    checkCancelled(signal);
+    const persistent = await this.open();
+    checkCancelled(signal);
+    const keepCovers = new Set(tracks.filter(track => track.hasCover).map(track => track.id));
+    if (persistent) {
+      const tx = this.db!.transaction([TRACKS, COVERS], "readwrite");
+      const trackStore = tx.objectStore(TRACKS), coverStore = tx.objectStore(COVERS);
+      const completion = finishTransaction(tx, signal);
+      trackStore.clear();
+      for (const track of tracks) trackStore.put(track);
+      for (const cover of covers) coverStore.put(cover.blob, cover.id);
+      const keys = coverStore.getAllKeys();
+      keys.onsuccess = () => {
+        for (const key of keys.result) if (!keepCovers.has(String(key))) coverStore.delete(key);
+      };
+      await completion;
+      return;
+    }
+    const nextCovers = new Map([...this.memory.covers].filter(([id]) => keepCovers.has(id)));
+    for (const cover of covers) nextCovers.set(cover.id, cover.blob);
+    checkCancelled(signal);
+    this.memory = { ...this.memory, tracks: new Map(tracks.map(track => [track.id, track])), covers: nextCovers };
+  }
+
+  async putRoot(root: StoredRoot, signal?: AbortSignal): Promise<void> {
+    checkCancelled(signal);
+    const persistent = await this.open();
+    checkCancelled(signal);
+    if (persistent) {
       try {
         const tx = this.db!.transaction(META, "readwrite");
         tx.objectStore(META).put(root, ROOT_KEY);
-        await transactionDone(tx);
+        await finishTransaction(tx, signal);
         return;
       } catch {
+        checkCancelled(signal);
         // Handles are only structured-cloneable in Chromium; keep the memory copy.
       }
     }
@@ -178,13 +230,17 @@ export class MusicStore {
     return this.memory.root;
   }
 
-  async clearLibrary(): Promise<void> {
-    if (await this.open()) {
+  async clearLibrary(signal?: AbortSignal): Promise<void> {
+    checkCancelled(signal);
+    const persistent = await this.open();
+    checkCancelled(signal);
+    if (persistent) {
       const tx = this.db!.transaction([TRACKS, COVERS], "readwrite");
       tx.objectStore(TRACKS).clear();
       tx.objectStore(COVERS).clear();
-      await transactionDone(tx);
+      await finishTransaction(tx, signal);
     }
+    checkCancelled(signal);
     this.memory.tracks.clear();
     this.memory.covers.clear();
   }

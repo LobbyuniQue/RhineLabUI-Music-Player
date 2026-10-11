@@ -79,7 +79,7 @@ export class MusicSearchIndex<T extends SearchableTrack> {
     }));
   }
 
-  search(query: string, field: SearchField = "all", limit = 240): T[] {
+  search(query: string, field: SearchField = "all", limit = Infinity): T[] {
     const terms = tokenize(query);
     if (!terms.length) return this.entries.slice(0, limit).map((entry) => entry.track);
     const scored: { track: T; score: number }[] = [];

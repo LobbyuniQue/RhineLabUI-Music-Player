@@ -157,6 +157,47 @@ try {
 
   const library = await request("/api/library");
   const low = library.body.tracks.find((track) => /低频/.test(track.name));
+  await step("静默准备与一次性开始票据（鉴权、曲目边界、起点保持）", async () => {
+    assert.equal((await request(`/api/prepare?id=${low.id}`, {})).status, 401);
+    assert.equal((await request("/api/prepare?id=not-scanned")).status, 400);
+    const prepared = await request(`/api/prepare?id=${low.id}&client=native-check&sequence=1`);
+    assert.equal(prepared.status, 200); assert.equal(prepared.body.ready, true);
+    await sleep(900);
+    const held = (await request("/api/status")).body;
+    assert.equal(held.state, "paused"); assert.equal(held.prepared, true);
+    assert.ok(held.time <= 0.15, `准备期间不能推进播放起点: ${held.time}`);
+    const bands = (await request("/api/bands")).body.bands;
+    assert.ok(bands.every((value) => value === 0), "准备阶段不得发布播放频谱");
+    await request("/api/volume?value=180");
+    assert.equal((await request("/api/status")).body.volume, 180, "等待揭示期间修改的音量应保留");
+    assert.equal((await request("/api/start?ticket=wrong&client=native-check&sequence=2")).status, 409);
+    assert.equal((await request("/api/status")).body.prepared, true, "错误票据不能取消有效准备");
+    const again = await request(`/api/prepare?id=${low.id}&client=native-check&sequence=3`);
+    assert.equal(again.status, 200);
+    assert.equal((await request(`/api/start?ticket=${again.body.ticket}&client=native-check&sequence=4`)).status, 200);
+    assert.equal((await request(`/api/start?ticket=${again.body.ticket}&client=native-check&sequence=5`)).status, 409);
+    const playing = (await request("/api/status")).body;
+    assert.equal(playing.state, "playing", "重复票据不能中断已经开始的歌曲");
+    assert.equal(playing.volume, 180);
+    await request("/api/stop");
+  });
+  await step("停止使旧准备序号及开始票据失效，恢复用户音量", async () => {
+    const pending = request(`/api/prepare?id=${low.id}&client=cancellation-check&sequence=1`);
+    await sleep(10);
+    const stopped = await request("/api/stop?client=cancellation-check&sequence=2");
+    assert.equal(stopped.status, 200);
+    const result = await pending;
+    assert.ok(result.status === 200 || result.status === 409, `旧准备意外返回 ${result.status}`);
+    if (result.status === 200) assert.equal((await request(`/api/start?ticket=${result.body.ticket}&client=cancellation-check&sequence=3`)).status, 409);
+    assert.equal((await request(`/api/prepare?id=${low.id}&client=cancellation-check&sequence=1`)).status, 409);
+    await sleep(400);
+    const state = (await request("/api/status")).body;
+    assert.equal(state.state, "stopped");
+    assert.equal(state.currentId, null);
+    assert.equal(state.prepared, false);
+    assert.equal(state.volume, 180);
+    await request("/api/volume?value=256");
+  });
   await step(`通过 VLC 播放 ${low.name}`, async () => {
     const play = await request(`/api/play?id=${encodeURIComponent(low.id)}`);
     assert.equal(play.status, 200);
@@ -209,6 +250,11 @@ try {
     await sleep(1200);
     const paused = (await request("/api/status")).body;
     assert.equal(paused.state, "paused", `暂停未生效：${paused.state}`);
+    await request("/api/resume");
+    await sleep(500);
+    const resumed = (await request("/api/status")).body;
+    assert.equal(resumed.state, "playing");
+    assert.ok(resumed.time >= paused.time, `恢复应延续位置: ${paused.time} -> ${resumed.time}`);
     await request("/api/stop");
   });
 

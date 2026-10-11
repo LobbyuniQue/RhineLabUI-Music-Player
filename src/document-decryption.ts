@@ -9,6 +9,8 @@ export class DocumentDecryption {
   private started: number | null = null;
   private progress = 0;
 
+  get complete() { return this.progress === 1; }
+
   reset(root: HTMLElement, clear: boolean) {
     this.remove();
     this.root = root;
@@ -69,7 +71,18 @@ export class DocumentDecryption {
     this.paint();
   }
 
-  update(now: number, frame: DecryptionFrame, reduced: boolean) {
+  update(now: number, frame: DecryptionFrame, reduced: boolean, hold = false) {
+    if (this.root) this.root.dataset.revealHeld = String(hold);
+    if (hold) {
+      // Loading and errors keep the black masks intact, even with reduced motion.
+      if (this.progress !== 0) {
+        this.progress = 0;
+        this.refresh();
+      }
+      this.started = null;
+      this.paint();
+      return;
+    }
     if (!this.root || this.progress === 1) return;
     if (reduced) this.progress = 1;
     else {

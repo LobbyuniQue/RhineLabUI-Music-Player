@@ -123,12 +123,15 @@ export class ArchiveScene {
   private coverAttribute?: THREE.InstancedBufferAttribute;
   private coverUpdates?: InstanceUpdates;
   private coverProvider: ((recordIndex: number) => number) | null = null;
+  private prepareCoverFrame: ((recordIndices: readonly number[]) => void) | null = null;
   private coverTexture: THREE.Texture | null = null;
   private coverUniform?: { value: THREE.Texture | null };
   private coverEnabledUniform?: { value: number };
   /** Installs the cover-atlas source (tile resolver + texture). */
-  setCoverProvider(provider: ((recordIndex: number) => number) | null, texture: THREE.Texture | null) {
+  setCoverProvider(provider: ((recordIndex: number) => number) | null, texture: THREE.Texture | null,
+    prepareFrame: ((recordIndices: readonly number[]) => void) | null = null) {
     this.coverProvider = provider;
+    this.prepareCoverFrame = prepareFrame;
     this.coverTexture = texture;
     if (this.coverUniform) this.coverUniform.value = texture;
     if (this.coverEnabledUniform) this.coverEnabledUniform.value = provider ? 1 : 0;
@@ -228,7 +231,7 @@ export class ArchiveScene {
   }[] = [];
   private pulses: { row: number; lane: number; time: number }[] = [];
   private pendingPulse: ArchiveCell | null = null;
-  private selectedSlot = 76;
+  private selectedSlot = fileLocation(fileAtCell(this.selectedCell)).slot;
   private detail = 0;
   private targetDetail = 0;
   private reveal = 0;
@@ -548,7 +551,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     this.appearance.apply(this.model, 0);
     this.drawLabel(0);
     this.scene.add(this.model);
-    this.model.position.copy(this.cellPosition(poolCell(this.selectedSlot)));
+    this.model.position.copy(this.cellPosition(this.selectedCell));
     this.loaded = true;
   }
 
@@ -1537,7 +1540,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     const detail = this.detail;
     // Keep the physical decryption timeline alive even when its model visuals
     // are disabled; the document mask uses the same timeline independently.
-    this.decryption.update(dt, detail > .78 && this.lift.value > 3.3, false,
+    this.decryption.update(this.decryptionHeld ? 0 : dt, !this.decryptionHeld && detail > .78 && this.lift.value > 3.3, false,
       cinematic ? shot + 5 : undefined);
     this.appearance.apply(this.model, ease(this.lift.value / 0.4));
     this.appearance.setClarity(this.model, this.modelClarity());
@@ -1796,6 +1799,9 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     if (this.themeAttribute) this.themeUpdates ??= new InstanceUpdates(this.themeAttribute);
     const coversVisible = Boolean(this.coverProvider) && activeView().kind === "music";
     if (this.coverAttribute) this.coverUpdates ??= new InstanceUpdates(this.coverAttribute);
+    // Decide the complete visible set before resolving cover tiles. Recycling
+    // during the instance loop would let two cards sample the same reused tile.
+    const drawable: { cell: ArchiveCell; x: number; y: number; z: number }[] = [];
     for (const cell of this.cells) {
       const { row, lane } = cell;
       if (hidden.has(cellKey(cell))) continue;
@@ -1803,6 +1809,17 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
       const y = -4.6 + field(row, lane) + hoverLift(cell) - this.presentationDrop(cell);
       const z = (row - 15.5) * this.rowSpacing() + entryZ + this.rail.value;
       if (!fixed && !this.visibility.intersects(x, y, z)) continue;
+      drawable.push({ cell, x, y, z });
+    }
+    // Under unusually dense/wide views the atlas can run out of simultaneous
+    // tiles. Give cards near the camera's focus priority over the outer margin.
+    const coverPriority = coversVisible ? drawable.map(({ cell, x, y, z }) => ({
+      index: fileAtCell(cell),
+      distance: (x - this.cameraAim.x) ** 2 + (y + 1.85 - this.cameraAim.y) ** 2 + (z - this.cameraAim.z) ** 2,
+    })).sort((a, b) => a.distance - b.distance).map(({ index }) => index) : [];
+    this.prepareCoverFrame?.(coverPriority);
+    for (const { cell, x, y, z } of drawable) {
+      const { row, lane } = cell;
       const i = this.drawnCells.length;
       this.ensureInstanceCapacity(i + 1);
       this.drawnCells.push(cell);
@@ -1921,6 +1938,14 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     return [(p.x + 1) * this.container.clientWidth / 2, (1 - p.y) * this.container.clientHeight / 2];
   }
   get decryptionFrame() { return this.decryption.frame; }
+  private decryptionHeld = false;
+  setDecryptionHeld(held: boolean) {
+    if (held && !this.decryptionHeld) {
+      this.decryption.select(0);
+      this.decryption.enter();
+    }
+    this.decryptionHeld = held;
+  }
   finishDecryption() { this.decryption.finish(); }
   get detailVisibility() {
     return ease((this.detail - 0.25) / 0.55);
@@ -1968,7 +1993,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
       pulses: this.pulses.map((pulse) => ({ ...pulse })),
       referenceTime: Math.round((this.scanTime + 5) * 100) / 100,
       selectedSlot: this.selectedSlot,
-      selectedLane: Math.floor(this.selectedSlot / 32),
+      selectedLane: fileLocation(fileAtSlot(this.selectedSlot)).lane,
       selectedCell: { ...this.selectedCell },
       hoverCell: this.hoverCell ? { ...this.hoverCell } : null,
       hoverLifts: Object.fromEntries(this.hoverLifts),

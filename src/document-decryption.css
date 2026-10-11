@@ -22,3 +22,7 @@
 .reduce-motion .document-redaction-window {
   display: none;
 }
+
+.reduce-motion [data-reveal-held="true"] .document-redaction-window {
+  display: block;
+}

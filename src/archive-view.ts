@@ -25,6 +25,8 @@ export interface ArchiveView {
   records: ArchiveRecord[];
   /** Record indices of a data column, in display order (precomputed). */
   columnFiles(lane: number): number[];
+  /** Logical coordinates are independent of the visible instance pool. Slot
+   * is an opaque record index, never a fixed-width lane/row encoding. */
   fileLocation(index: number): { lane: number; row: number; slot: number };
   fileAtSlot(slot: number): number;
   /** Stable backing id of a record (archive id / track id), used to keep the
@@ -46,9 +48,12 @@ export function buildView(
   backingId?: (index: number) => string,
 ): ArchiveView {
   const byColumn: number[][] = columns.map(() => []);
+  const locations: { lane: number; row: number; slot: number }[] = [];
   records.forEach((record, index) => {
     const lane = laneOf(record);
-    if (lane >= 0 && lane < columns.length) byColumn[lane].push(index);
+    const files = byColumn[lane];
+    locations[index] = { lane, row: 12 + (files?.length ?? 0), slot: index };
+    if (files) files.push(index);
   });
   return {
     backingId: backingId ?? ((index) => records[index].id),
@@ -58,19 +63,15 @@ export function buildView(
     records,
     columnFiles: (lane) => byColumn[lane] ?? [],
     fileLocation(index) {
-      const lane = laneOf(records[index]);
-      const row = 12 + byColumn[lane].indexOf(index);
-      return { lane, row, slot: lane * 32 + row };
+      return locations[index] ?? { lane: 0, row: 12, slot: 0 };
     },
     fileAtSlot(slot) {
-      const files = byColumn[Math.floor(slot / 32)] ?? [];
-      if (!files.length) return 0;
-      return files[Math.max(0, Math.min(files.length - 1, (slot % 32) - 12))];
+      return Number.isInteger(slot) && slot >= 0 && slot < records.length ? slot : 0;
     },
   };
 }
 
-/** The built-in Rhine archive, byte-identical to the original data.ts wiring. */
+/** The built-in Rhine archive retains its original column/row geometry. */
 export const rhineView: ArchiveView = buildView(
   "archive",
   rhineColumns,

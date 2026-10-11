@@ -30,7 +30,8 @@ test('Pages redirects remain compatible with cached homepage navigation', async 
       add: async request => { throw new Error(`Unexpected cache.add: ${request.url}`); },
     };
     let offline = false;
-    runInNewContext(template.replace('__CACHE_VERSION__', '"fixture"').replace('__PRECACHE_FILES__', '["index.html"]'), {
+    runInNewContext(template.replace('__CACHE_VERSION__', '"fixture"').replace('__PRECACHE_FILES__', '["index.html"]')
+      .replace('__OPTIONAL_FILES__', '[]').replace('__FILE_SIZES__', '{}').replace('__OPTIONAL_HASHES__', '{}'), {
       URL, Request, Response, Set,
       fetch: request => { if (offline) throw new Error('offline'); return fetch(request); },
       caches: { open: async () => cache, delete: async () => {} },

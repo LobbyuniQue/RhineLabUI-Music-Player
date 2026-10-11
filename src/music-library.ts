@@ -55,6 +55,9 @@ export type ScanReport = ScanProgress & {
 
 const BATCH = 40;
 const COVER_MAX = 256;
+export const COVER_URL_LIMIT = 384;
+const COVER_URL_GRACE_MS = 1000;
+export type CoverLease = { url: string; release(): void };
 
 /** Yields to the event loop (and to idle time when the browser offers it). */
 function breathe(): Promise<void> {
@@ -146,35 +149,65 @@ export class MusicLibrary {
   private coverUrls = new Map<string, string>();
   private coverPromises = new Map<string, Promise<string | null>>();
   private coverGeneration = 0;
+  private pinnedCovers = new Set<string>();
+  private coverHolds = new Map<string, number>();
+  private coverTouchedAt = new Map<string, number>();
+  private coverTrimTimer: ReturnType<typeof setTimeout> | null = null;
+  private operationGeneration = 0;
+  private operation = new AbortController();
+  private scanGeneration: number | null = null;
+  private reuseSource = true;
+
+  constructor(private readonly coverUrlLimit = COVER_URL_LIMIT) {}
+
+  private beginOperation() {
+    this.operation.abort();
+    this.operation = new AbortController();
+    this.scanning = false;
+    this.scanGeneration = null;
+    return ++this.operationGeneration;
+  }
+  private currentOperation(generation: number) {
+    return generation === this.operationGeneration && !this.operation.signal.aborted;
+  }
 
   async restore(): Promise<boolean> {
+    const generation = this.beginOperation();
     await this.store.open();
     const saved = await this.store.allTracks();
+    const root = await this.store.root();
+    if (!this.currentOperation(generation)) return false;
+    this.releaseCovers();
     this.stored = new Map(saved.map((track) => [track.id, track]));
     this.tracks = saved.map(toLibraryTrack);
     this.refreshIndex();
-    const root = await this.store.root();
     const handle = asDirHandle(root?.handle);
     if (handle) {
       this.source = directorySource(handle, root?.name ?? handle.name);
       this.label = this.source.label;
       this.persistent = true;
+      this.reuseSource = true;
       return true;
     }
     if (saved.length) {
+      this.source = null;
       this.label = "上次会话（需重新选择目录）";
       this.persistent = false;
       return true;
     }
+    this.source = null;
     return false;
   }
 
   /** Re-opens the remembered directory inside a user gesture. */
   async reconnect(): Promise<boolean> {
+    const generation = this.beginOperation();
     const root = await this.store.root();
+    if (!this.currentOperation(generation)) return false;
     const handle = asDirHandle(root?.handle);
     if (!handle) return false;
     if (!(await ensurePermission(handle, true))) return false;
+    if (!this.currentOperation(generation)) return false;
     this.source = directorySource(handle, root?.name ?? handle.name);
     this.label = this.source.label;
     this.persistent = true;
@@ -182,21 +215,34 @@ export class MusicLibrary {
   }
 
   async pick(): Promise<boolean> {
+    const generation = this.beginOperation();
+    const signal = this.operation.signal;
     const handle: DirHandle = await pickDirectory();
+    if (!this.currentOperation(generation)) return false;
     const granted = await ensurePermission(handle, true);
+    if (!this.currentOperation(generation)) return false;
     if (!granted) throw new Error("permission");
+    try {
+      await this.store.putRoot({ name: handle.name, handle, savedAt: Date.now() }, signal);
+    } catch (error) {
+      if (!this.currentOperation(generation)) return false;
+      throw error;
+    }
+    if (!this.currentOperation(generation)) return false;
     this.source = directorySource(handle);
     this.label = handle.name;
     this.persistent = true;
-    await this.store.putRoot({ name: handle.name, handle, savedAt: Date.now() });
+    this.reuseSource = false;
     return true;
   }
 
   /** Fallback path for browsers without the File System Access API. */
   useFiles(files: FileList | File[]) {
+    this.beginOperation();
     this.source = fileListSource(files, "本次选择（不保存）");
     this.label = this.source.label;
     this.persistent = false;
+    this.reuseSource = false;
   }
 
   /**
@@ -204,6 +250,8 @@ export class MusicLibrary {
    * files, the tags and playback, so the page only searches and displays it.
    */
   useBridgeTracks(tracks: readonly BridgeTrack[], root: string) {
+    this.beginOperation();
+    this.releaseCovers();
     this.source = null;
     this.persistent = true;
     this.label = root || "VLC 桥接";
@@ -231,7 +279,7 @@ export class MusicLibrary {
     this.refreshIndex();
   }
 
-  search(query: string, field: SearchField = "all", limit = 240): LibraryTrack[] {
+  search(query: string, field: SearchField = "all", limit = Infinity): LibraryTrack[] {
     return this.index.search(query, field, limit);
   }
 
@@ -262,9 +310,67 @@ export class MusicLibrary {
   /** Bridge covers stream from the bridge instead of IndexedDB (2.0). */
   bridgeCoverUrl?: (id: string) => Promise<string | null>;
 
+  /** Protect current visible, selected and playing covers. The budget may be
+   * temporarily exceeded when every entry is actively pinned/leased. */
+  pinCoverIds(ids: Iterable<string>) {
+    const next = new Set(ids);
+    if (next.size === this.pinnedCovers.size && [...next].every(id => this.pinnedCovers.has(id))) return;
+    this.pinnedCovers = next;
+    this.scheduleCoverTrim();
+  }
+
+  /** Keep the URL alive until an asynchronous decoder/consumer releases it. */
+  async acquireCover(track: LibraryTrack): Promise<CoverLease | null> {
+    const generation = this.coverGeneration;
+    this.coverHolds.set(track.id, (this.coverHolds.get(track.id) ?? 0) + 1);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (generation !== this.coverGeneration) return;
+      const remaining = (this.coverHolds.get(track.id) ?? 1) - 1;
+      if (remaining > 0) this.coverHolds.set(track.id, remaining);
+      else this.coverHolds.delete(track.id);
+      this.scheduleCoverTrim();
+    };
+    try {
+      const url = await this.coverUrl(track);
+      if (!url) { release(); return null; }
+      return { url, release };
+    } catch (error) { release(); throw error; }
+  }
+
+  private scheduleCoverTrim(delay = 0) {
+    if (this.coverTrimTimer !== null) clearTimeout(this.coverTrimTimer);
+    this.coverTrimTimer = null;
+    if (this.coverUrls.size <= this.coverUrlLimit) return;
+    this.coverTrimTimer = setTimeout(() => {
+      this.coverTrimTimer = null;
+      let retryIn = Infinity;
+      const now = performance.now();
+      for (const [id, url] of this.coverUrls) {
+        if (this.coverUrls.size <= this.coverUrlLimit) break;
+        if (this.pinnedCovers.has(id) || this.coverHolds.has(id) || this.coverPromises.has(id)) continue;
+        const grace = COVER_URL_GRACE_MS - (now - (this.coverTouchedAt.get(id) ?? 0));
+        if (grace > 0) { retryIn = Math.min(retryIn, grace); continue; }
+        URL.revokeObjectURL(url);
+        this.coverUrls.delete(id);
+        this.coverTouchedAt.delete(id);
+      }
+      if (this.coverUrls.size > this.coverUrlLimit && Number.isFinite(retryIn))
+        this.scheduleCoverTrim(Math.max(1, retryIn));
+    }, delay);
+  }
+
   async coverUrl(track: LibraryTrack): Promise<string | null> {
     const cached = this.coverUrls.get(track.id);
-    if (cached) return cached;
+    if (cached) {
+      this.coverUrls.delete(track.id);
+      this.coverUrls.set(track.id, cached);
+      this.coverTouchedAt.set(track.id, performance.now());
+      this.scheduleCoverTrim();
+      return cached;
+    }
     const pending = this.coverPromises.get(track.id);
     if (pending) return pending;
     if (!track.hasCover) return null;
@@ -291,36 +397,42 @@ export class MusicLibrary {
         return null;
       }
       this.coverUrls.set(track.id, url);
+      this.coverTouchedAt.set(track.id, performance.now());
+      this.scheduleCoverTrim();
       return url;
     })();
     this.coverPromises.set(track.id, request);
     try {
       return await request;
     } finally {
-      this.coverPromises.delete(track.id);
+      if (this.coverPromises.get(track.id) === request) this.coverPromises.delete(track.id);
     }
   }
 
   async file(track: LibraryTrack): Promise<File | null> {
     if (!this.source) return null;
-    const file = await this.source.resolve(track.path);
+    const source = this.source, generation = this.operationGeneration;
+    const file = await source.resolve(track.path);
+    if (source !== this.source || generation !== this.operationGeneration) return null;
     if (!file) {
       track.missing = true;
       const stored = this.stored.get(track.id);
       if (stored) {
         stored.missing = true;
-        void this.store.putTracks([stored]);
+        void this.store.putTracks([stored], this.operation.signal).catch(() => {});
       }
     }
     return file;
   }
 
   async clear(): Promise<void> {
-    await this.store.clearLibrary();
+    const generation = this.beginOperation(), signal = this.operation.signal;
     this.stored.clear();
     this.tracks = [];
     this.refreshIndex();
     this.releaseCovers();
+    try { await this.store.clearLibrary(signal); }
+    catch (error) { if (this.currentOperation(generation)) throw error; }
   }
 
   releaseCovers() {
@@ -328,14 +440,31 @@ export class MusicLibrary {
     for (const url of this.coverUrls.values()) URL.revokeObjectURL(url);
     this.coverUrls.clear();
     this.coverPromises.clear();
+    this.coverHolds.clear();
+    this.coverTouchedAt.clear();
+    if (this.coverTrimTimer !== null) clearTimeout(this.coverTrimTimer);
+    this.coverTrimTimer = null;
   }
 
   private refreshIndex() {
-    this.index = new MusicSearchIndex<LibraryTrack>(this.tracks);
     this.tracks = [...this.tracks].sort((a, b) =>
       a.path.localeCompare(b.path, "zh-Hans-CN"),
     );
     this.index = new MusicSearchIndex<LibraryTrack>(this.tracks);
+  }
+
+  /** Cancel pending discovery/metadata/commit without changing the last
+   * successfully published catalogue. A later scan can start immediately. */
+  cancelScan() {
+    if (!this.scanning) return;
+    this.operation.abort();
+    this.scanning = false;
+    this.scanGeneration = null;
+  }
+
+  /** Engine/source handoffs also invalidate a pending picker or restore. */
+  cancelPending() {
+    this.beginOperation();
   }
 
   /**
@@ -361,8 +490,24 @@ export class MusicLibrary {
       ms: 0,
     };
     if (!this.source || this.scanning) return report;
+    const generation = this.beginOperation();
+    const controller = this.operation;
+    const cancel = () => controller.abort();
+    options.signal?.addEventListener("abort", cancel, { once: true });
+    if (options.signal?.aborted) controller.abort();
     this.scanning = true;
+    this.scanGeneration = generation;
     const source = this.source;
+    const previous = new Map(this.stored);
+    const reuseSource = this.reuseSource;
+    const next = new Map<string, StoredTrack>();
+    const check = () => {
+      if (controller.signal.aborted || !this.currentOperation(generation) || this.source !== source)
+        throw new DOMException("Scan cancelled", "AbortError");
+    };
+    const publishProgress = () => {
+      if (generation === this.operationGeneration) onProgress({ ...report });
+    };
     const seen = new Set<string>();
     const stale: {
       id: string;
@@ -372,26 +517,24 @@ export class MusicLibrary {
       modified: number;
       load: () => Promise<File>;
     }[] = [];
-    const pending: StoredTrack[] = [];
     const covers: { id: string; blob: Blob }[] = [];
 
     try {
       report.phase = "walking";
+      check();
       for await (const entry of source.entries()) {
-        if (options.signal?.aborted) {
-          report.phase = "cancelled";
-          break;
-        }
+        check();
         report.seen++;
         report.bytes += entry.size;
         if (!isAudioFile(entry.name)) continue;
         seen.add(entry.path);
         report.total++;
-        const previous = this.stored.get(entry.path);
+        const saved = previous.get(entry.path);
         const unchanged =
-          previous && previous.size === entry.size && previous.modified === entry.modified && !previous.missing;
+          reuseSource && saved && saved.size === entry.size && saved.modified === entry.modified && !saved.missing;
         if (unchanged) {
           report.reused++;
+          next.set(saved.id, saved);
         } else {
           stale.push({
             id: entry.path,
@@ -403,85 +546,85 @@ export class MusicLibrary {
           });
         }
         if (report.seen % 200 === 0) {
-          onProgress({ ...report });
+          publishProgress();
           await breathe();
+          check();
         }
       }
 
-      if (report.phase === "cancelled") {
-        report.ms = Date.now() - started;
-        onProgress({ ...report });
-        return report;
-      }
+      check();
 
       report.phase = "reading";
-      onProgress({ ...report });
+      publishProgress();
       let processed = 0;
       for (const item of stale) {
-        if (options.signal?.aborted) {
-          report.phase = "cancelled";
-          break;
-        }
+        check();
         try {
           const file = await item.load();
+          check();
           const meta = await readTrackMeta(file, item.name);
-          let hasCover = this.stored.get(item.id)?.hasCover ?? false;
+          check();
+          let hasCover = false;
           if (meta.picture) {
             const cover = await thumbnail(
               new Blob([meta.picture.data as unknown as BlobPart], { type: meta.picture.mime }),
             );
+            check();
             if (cover) {
               covers.push({ id: item.id, blob: cover });
               hasCover = true;
             }
           }
-          pending.push(toStored(item, meta, hasCover));
+          next.set(item.id, toStored(item, meta, hasCover));
           report.parsed++;
-          if (this.stored.has(item.id)) report.updated++;
+          if (previous.has(item.id)) report.updated++;
           else report.added++;
         } catch {
+          check();
+          const saved = previous.get(item.id);
+          if (reuseSource && saved) next.set(item.id, saved);
           report.failed++;
         }
         if (++processed % BATCH === 0) {
-          onProgress({ ...report });
+          publishProgress();
           await breathe();
+          check();
         }
       }
 
       // Files that disappeared from the source are dropped from the index.
-      const removed: string[] = [];
-      for (const id of this.stored.keys()) if (!seen.has(id)) removed.push(id);
-      report.removed = removed.length;
+      check();
+      report.removed = [...previous.keys()].filter(id => !next.has(id)).length;
 
       report.phase = "saving";
-      onProgress({ ...report });
-      for (let i = 0; i < pending.length; i += 200) {
-        await this.store.putTracks(pending.slice(i, i + 200));
-        await breathe();
-      }
-      await this.store.removeTracks(removed);
-      for (let i = 0; i < covers.length; i += 20) {
-        for (const cover of covers.slice(i, i + 20)) await this.store.putCover(cover.id, cover.blob);
-        await breathe();
-      }
+      publishProgress();
+      check();
+      await this.store.commitScan([...next.values()], covers, { signal: controller.signal });
+      check();
 
       // Rebuild the in-memory view from the store so reused and parsed entries
       // share one code path.
-      const all = await this.store.allTracks();
-      this.stored = new Map(all.map((track) => [track.id, track]));
-      this.tracks = all.map(toLibraryTrack);
+      this.releaseCovers();
+      this.stored = next;
+      this.tracks = [...next.values()].map(toLibraryTrack);
+      this.reuseSource = true;
       this.refreshIndex();
       report.phase = "done";
       report.ms = Date.now() - started;
-      onProgress({ ...report });
+      publishProgress();
       return report;
     } catch {
-      report.phase = "error";
+      report.phase = controller.signal.aborted || !this.currentOperation(generation) || this.source !== source
+        ? "cancelled" : "error";
       report.ms = Date.now() - started;
-      onProgress({ ...report });
+      publishProgress();
       return report;
     } finally {
-      this.scanning = false;
+      options.signal?.removeEventListener("abort", cancel);
+      if (this.scanGeneration === generation) {
+        this.scanning = false;
+        this.scanGeneration = null;
+      }
     }
   }
 }

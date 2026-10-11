@@ -154,7 +154,7 @@ const edge = spawn(
     "--no-first-run",
     `--user-data-dir=${PROFILE}`,
     `--remote-debugging-port=${DEBUG_PORT}`,
-    "--window-size=900,640",
+    "--window-size=420,300",
     "about:blank",
   ],
   { stdio: "ignore", windowsHide: true },
@@ -171,6 +171,18 @@ try {
   const cdp = new Cdp(socket);
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");
+  // Hosted Windows runners use software rendering. Keep the real animations,
+  // but select the app's lightweight rendering before each document loads so
+  // fixture fetches and playback callbacks are not starved by the 3D scene.
+  await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `(() => {
+      const stored = JSON.parse(localStorage.getItem("rhine-settings") || "{}");
+      stored.superPerformance = true;
+      stored.reduced = false;
+      delete stored.motion;
+      localStorage.setItem("rhine-settings", JSON.stringify(stored));
+    })()`,
+  });
 
   const load = async () => {
     await cdp.send("Page.navigate", {
@@ -351,6 +363,7 @@ try {
     join(SHOTS, "music-panel-light.png"),
     Buffer.from(lightShot.data, "base64"),
   );
+  await cdp.send("Emulation.clearDeviceMetricsOverride");
 
   // Loop the current track: the tone files are six seconds long, and under
   // software rendering the poll loop is slow enough for list mode to rotate
@@ -409,6 +422,13 @@ try {
   );
   check("本地音乐占用背景音乐通道", bgmHandoff === true, String(bgmHandoff));
 
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 1600,
+    height: 1000,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await sleep(1200);
   const playingShot = await cdp.send("Page.captureScreenshot", {
     format: "png",
   });
@@ -745,8 +765,19 @@ try {
     false,
     20000,
   );
-  await sleep(500);
   // Back to the Rhine archive so the dark-theme pass runs in the classic mode.
+  // Closing animation keeps the navigation inert; wait for its completion
+  // instead of assuming it finishes within a fixed half second.
+  const modalClosed = await cdp.evaluate(
+    `new Promise(resolve => { const started = performance.now(); const poll = () => {
+      if (!document.querySelector('[data-action="close-modal"]') && !document.querySelector('.system-nav').inert) return resolve(true);
+      if (performance.now() - started > 10000) return resolve(false);
+      setTimeout(poll, 100);
+    }; poll(); })`,
+    true,
+    20000,
+  );
+  if (!modalClosed) throw new Error("Settings closing animation did not release archive navigation");
   await cdp.evaluate(
     `document.querySelector('[data-action="library-mode"]').click()`,
     false,

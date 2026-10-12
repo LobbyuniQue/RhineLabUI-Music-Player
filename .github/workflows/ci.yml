@@ -83,7 +83,7 @@ jobs:
           npm.cmd run test:e2e:music 2>&1 | Tee-Object -FilePath '.local/ci/browser-music.log'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: VLC UI direction, disconnect and reconnect integration
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           npm.cmd run test:e2e:vlc 2>&1 | Tee-Object -FilePath '.local/ci/vlc-ui.log'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

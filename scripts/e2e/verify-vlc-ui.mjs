@@ -514,6 +514,11 @@ try {
   if (results.some((result) => !result.ok))
     throw new Error(`VLC archive playback failed: ${JSON.stringify({ archiveStatus, archiveProgress })}`);
 
+  // The complete detail reveal has been verified. Return through the normal
+  // animation while exercising the remaining controls, so the browser engine
+  // handoff starts from the same archive surface as the browser-only suite.
+  await cdp.evaluate(`window.rhine.archive()`,false,20000);
+
   // Informational: issue another direct play and report what VLC does while the headless
   // page keeps rendering (this environment can starve VLC; bridge-only tests remain authoritative).
   const targetId = await cdp.evaluate(
@@ -757,11 +762,33 @@ try {
     !toBrowser.playing && vlcAfterSwitch.state === "stopped",JSON.stringify({toBrowser,vlcAfterSwitch}));
   if (!toBrowser.switched || toBrowser.engine !== "browser" || vlcAfterSwitch.state !== "stopped")
     throw new Error(`VLC handoff did not stop the old output: ${JSON.stringify({ toBrowser, vlcAfterSwitch })}`);
+  await closeModal();
+  handoffStage = "waiting for archive return";
+  console.log("handoff:", handoffStage);
+  const returnDeadline = Date.now() + 120000;
+  let returnState = null;
+  while (Date.now() < returnDeadline) {
+    returnState = await cdp.evaluate(`(() => {
+      const stats=window.rhine.stats();
+      return {mode:stats.mode,cameraDetail:stats.cameraDetail,extraction:stats.extraction,
+        returningFiles:stats.returningFiles,motion:stats.motion,
+        modal:!!document.querySelector('#modal-root [role="dialog"]')};
+    })()`,false,20000);
+    if (returnState.mode === "archive" && returnState.cameraDetail < .01 &&
+        returnState.extraction <= .41 && returnState.returningFiles === 0 && !returnState.modal)
+      break;
+    await sleep(1000);
+  }
+  console.log("handoff archive:",JSON.stringify(returnState));
+  if (returnState?.mode !== "archive" || !(returnState.cameraDetail < .01) ||
+      !(returnState.extraction <= .41) || returnState.returningFiles !== 0 || returnState.modal ||
+      returnState.motion.preset !== "full")
+    throw new Error(`Archive return did not finish before handoff: ${JSON.stringify(returnState)}`);
   handoffStage = "indexing browser fixture";
   console.log("handoff:", handoffStage);
   const handoffId=await cdp.evaluate(`(async()=>{
     const m=window.rhine.music;
-    const bytes=Uint8Array.from(atob(${JSON.stringify(sineWav(12,440,8000).toString('base64'))}),char=>char.charCodeAt(0));
+    const bytes=Uint8Array.from(atob(${JSON.stringify(sineWav(90,440,8000).toString('base64'))}),char=>char.charCodeAt(0));
     await m.useFiles([new File([bytes],'handoff.wav',{type:'audio/wav'})]);
     return m.library.tracks[0]?.id;
   })()`,true,60000);
@@ -770,17 +797,53 @@ try {
   console.log("handoff:", handoffStage);
   // A fresh user gesture reaches player.prepare before its first await;
   // indexing the file in an earlier CDP call cannot consume that gesture.
-  const browserStarted=await cdp.evaluate(
-    `window.rhine.music.player.play(window.rhine.music.library.tracks.find(t=>t.id===${JSON.stringify(handoffId)}))`,true,40000);
-  const before=await cdp.evaluate(`window.rhine.music.player.state()`,false,20000);
-  if (!browserStarted || !before.playing)
-    throw new Error(`Browser handoff fixture did not play: ${JSON.stringify(before)}`);
+  // Observe file resolution, context state and real media events without
+  // changing the player's preparation deadline or its readiness requirement.
+  await cdp.evaluate(`(() => {
+    const player=window.rhine.music.player, element=player.element, began=performance.now();
+    const trace=window.__handoffPlayback={done:false,started:false,fileResolved:false,samples:[]};
+    const record=phase=>{
+      trace.samples.push({phase,ms:Math.round(performance.now()-began),context:player.context?.state ?? null,
+        readyState:element.readyState,networkState:element.networkState,
+        hasSource:!!element.src,mediaError:element.error?.code ?? null});
+    };
+    const originalResolve=player.hooks.resolve;
+    const resolve=id=>originalResolve(id).then(file=>{
+      trace.fileResolved=!!file; record('file-resolved'); return file;
+    });
+    player.hooks.resolve=resolve;
+    const events=['loadstart','loadedmetadata','loadeddata','canplay','playing','error','stalled'];
+    const listeners=events.map(name=>[name,()=>record(name)]);
+    listeners.forEach(([name,listener])=>element.addEventListener(name,listener));
+    record('begin');
+    const playback=player.play(window.rhine.music.library.tracks.find(t=>t.id===${JSON.stringify(handoffId)}));
+    const signal=player.preparationAbort?.signal;
+    const aborted=()=>record('prepare-aborted');
+    signal?.addEventListener('abort',aborted,{once:true});
+    playback.then(started=>{trace.started=started;trace.state=player.state();},error=>{trace.error=String(error);}).finally(()=>{
+      record('finished'); trace.done=true;
+      if (player.hooks.resolve===resolve) player.hooks.resolve=originalResolve;
+      listeners.forEach(([name,listener])=>element.removeEventListener(name,listener));
+      signal?.removeEventListener('abort',aborted);
+    });
+  })()`,false,20000);
+  const playbackDeadline = Date.now() + 60000;
+  let playback = null;
+  while (Date.now() < playbackDeadline) {
+    playback = await cdp.evaluate(`window.__handoffPlayback`,false,20000);
+    if (playback?.done) break;
+    await sleep(1000);
+  }
+  console.log("handoff playback:",JSON.stringify(playback));
+  if (!playback?.done || !playback.started || !playback.state?.playing)
+    throw new Error(`Browser handoff fixture did not play: ${JSON.stringify(playback)}`);
   handoffStage = "switching back to VLC";
   console.log("handoff:", handoffStage);
   const toVlc=await cdp.evaluate(`(async()=>{
     const m=window.rhine.music;
+    const before=m.player.state().playing;
     const switched=await m.setEngine('vlc');
-    return {before:${JSON.stringify(before.playing)},switched,engine:m.bridge().engine,browser:m.player.state().playing,
+    return {before,switched,engine:m.bridge().engine,browser:m.player.state().playing,
       bridgeTracks:m.library.tracks.filter(t=>t.bridge).length};
   })()`,true,90000);
   check("浏览器切 VLC 前停止旧输出并恢复桥接曲库",toVlc.before && toVlc.switched &&
@@ -800,7 +863,8 @@ try {
       const m=window.rhine.music,b=m.bridge();
       return {player:m.player.state(),access:m.access(),engine:b.engine,connected:b.connected,error:b.error,
         bridgeStatus:b.status,tracks:m.library.tracks.map(t=>({id:t.id,name:t.name,bridge:t.bridge})),
-        scene:window.rhine.stats().mode,modal:!!document.querySelector('#modal-root [role="dialog"]')};
+        scene:window.rhine.stats().mode,modal:!!document.querySelector('#modal-root [role="dialog"]'),
+        handoffPlayback:window.__handoffPlayback ?? null};
     })()`,false,15000).catch(error => ({ error: error.message }));
     console.log("page failure state:",JSON.stringify(diagnostic));
   }

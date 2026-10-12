@@ -306,7 +306,7 @@ function panelFixture(f, initialEngine = "browser") {
   const bridge = {
     connected: true,
     play: async (id) => { bridgePlays.push(id); currentId = id; },
-    status: async () => status(), pause: async () => { bridgeState = "paused"; },
+    pollStatus: async () => status(), pause: async () => { bridgeState = "paused"; },
     resume: async () => { bridgeState = "playing"; },
     queueTracks: (value) => { bridgeQueue = value; },
     setMode: (value) => { bridgeMode = value; }, mode: () => bridgeMode,
@@ -356,9 +356,9 @@ await check("late bridge command/poll cannot overwrite a newer command or change
   setEngine("browser"); gate.resolve(); await pending;
   assert.equal(panel.bridgeStatus.currentId, "B");
   setEngine("vlc");
-  const oldStatus = deferred(); bridge.status = () => oldStatus.promise;
+  const oldStatus = deferred(); bridge.pollStatus = () => oldStatus.promise;
   const poll = panel.pollBridge();
-  bridge.play = async () => {}; bridge.status = async () => ({ state: "playing", currentId: "C", time: 0, length: 60 });
+  bridge.play = async () => {}; bridge.pollStatus = async () => ({ state: "playing", currentId: "C", time: 0, length: 60 });
   await panel.runAction("next");
   oldStatus.resolve({ state: "playing", currentId: "A", time: 0, length: 60 }); await poll;
   assert.equal(panel.bridgeStatus.currentId, "C");

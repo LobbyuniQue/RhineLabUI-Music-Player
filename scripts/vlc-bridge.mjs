@@ -28,6 +28,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readTrackMeta, isAudioFile } from "../src/music-metadata.ts";
+import { VlcOperationQueue, VlcStatusReader, waitWithSignal } from "./lib/vlc-status.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT = resolve(HERE, "..");
@@ -262,21 +263,31 @@ const vlcAuth = "Basic " + Buffer.from(`:${TOKEN}`).toString("base64");
 let current = { id: null, startedAt: 0 };
 let prepared = null;
 let transportRevision = 0;
-let transportTask = Promise.resolve();
 let transportIntent = "stopped";
 let hasStarted = false;
 let desiredVolume = 256;
 let preparationMuted = false;
 const clientSequences = new Map();
+const statusReader = new VlcStatusReader((signal) => vlcCall("", signal));
+const controlQueue = new VlcOperationQueue(() => statusReader.invalidate());
 
-async function vlcCall(query = "") {
-  const response = await fetch(vlcUrl(query), { headers: { authorization: vlcAuth }, signal: AbortSignal.timeout(8000) });
-  if (!response.ok) throw new Error(`VLC HTTP ${response.status}`);
-  const text = await response.text();
+async function vlcCall(query = "", signal) {
+  // A post-control receipt must never join a read started before the command.
+  if (query) statusReader.invalidate();
+  const timeout = AbortSignal.timeout(8000);
+  const started = Date.now();
   try {
-    return JSON.parse(text);
-  } catch {
-    return null;
+    const response = await fetch(vlcUrl(query), { headers: { authorization: vlcAuth }, signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+    if (!response.ok) throw new Error(`VLC HTTP ${response.status}`);
+    const text = await response.text();
+    try { return JSON.parse(text); } catch { return null; }
+  } catch (error) {
+    // Deliberately omit URLs, paths and credentials; expected invalidation is quiet.
+    if (!signal?.aborted) {
+      const command = query ? new URLSearchParams(query.slice(1)).get("command") ?? "control" : "status";
+      console.error(`[bridge] VLC ${command} failed (${error.name ?? "Error"}, ${Date.now() - started}ms)`);
+    }
+    throw error;
   }
 }
 
@@ -415,9 +426,7 @@ function serialTransport(url, operation) {
     if (clientSequences.size > 256) clientSequences.delete(clientSequences.keys().next().value);
   }
   const revision = ++transportRevision;
-  const task = transportTask.then(() => { assertTransport(revision); return operation(revision); });
-  transportTask = task.catch(() => {});
-  return task;
+  return controlQueue.run(() => { assertTransport(revision); return operation(revision); });
 }
 
 async function prepareTrack(id, revision, position = 0) {
@@ -464,17 +473,15 @@ async function startPrepared(ticket, revision) {
   return { started: true, status: await status() };
 }
 
-let cachedRaw = null;
-let cachedAt = 0;
+function refreshStatus() {
+  return statusReader.read();
+}
 
-async function refreshStatus() {
-  try {
-    cachedRaw = await vlcCall();
-    cachedAt = Date.now();
-  } catch {
-    cachedRaw = null;
-  }
-  return cachedRaw;
+function pollStatus() {
+  // Internal reads in the serialized operation still run; only background
+  // polling is suspended while a control is pending or active.
+  if (controlQueue.pending || stopping) return;
+  void refreshStatus();
 }
 
 /** Maps a raw VLC status into the shape the page consumes. */
@@ -494,14 +501,25 @@ function mapStatus(raw) {
     artist: meta.artist ?? "",
     album: meta.album ?? "",
     codec: library.find((entry) => entry.id === current.id)?.codec ?? "",
-    vlc: { version: vlcInfo.version, pid: vlc?.pid ?? null, startedAt: vlcInfo.startedAt, cachedAt },
+    vlc: { version: vlcInfo.version, pid: vlc?.pid ?? null, startedAt: vlcInfo.startedAt, cachedAt: statusReader.cachedAt },
   };
 }
 
-/** Live status with a cached fallback while VLC is busy. */
+/** Internal, authoritative live status; never substitutes a cached stop receipt. */
 async function status() {
   const raw = await refreshStatus();
-  return mapStatus(raw ?? cachedRaw);
+  return mapStatus(raw);
+}
+
+/** External reads wait for controls, then coalesce with the current background read. */
+async function publicStatus(signal = AbortSignal.timeout(8000)) {
+  for (;;) {
+    signal.throwIfAborted();
+    await controlQueue.idle(signal);
+    const revision = statusReader.revision;
+    const raw = await waitWithSignal(refreshStatus(), signal);
+    if (!controlQueue.pending && revision === statusReader.revision) return mapStatus(raw);
+  }
 }
 
 /**
@@ -510,7 +528,7 @@ async function status() {
  * slow render frame.
  */
 function statusCached() {
-  return mapStatus(cachedRaw);
+  return mapStatus(statusReader.cachedRaw);
 }
 
 // -------------------------------------------------------------- spectrum tap
@@ -774,18 +792,33 @@ async function handle(req, res) {
   if (url.pathname === "/api/seek") {
     const seconds = Number(url.searchParams.get("seconds") ?? 0);
     if (!Number.isFinite(seconds)) return json(res, 400, { error: "invalid playback position" });
-    await vlcCall(`?command=seek&val=${encodeURIComponent(String(Math.max(0, seconds)))}`);
-    return json(res, 200, await status());
+    const result = await controlQueue.run(async () => {
+      await vlcCall(`?command=seek&val=${encodeURIComponent(String(Math.max(0, seconds)))}`);
+      return status();
+    });
+    return json(res, 200, result);
   }
   if (url.pathname === "/api/volume") {
     const requested = Number(url.searchParams.get("value") ?? 256);
     if (!Number.isFinite(requested)) return json(res, 400, { error: "invalid volume" });
     const value = Math.max(0, Math.min(512, requested));
     desiredVolume = Math.round(value);
-    if (!preparationMuted) await vlcCall(`?command=volume&val=${desiredVolume}`);
-    return json(res, 200, await status());
+    const result = await controlQueue.run(async () => {
+      if (!preparationMuted) await vlcCall(`?command=volume&val=${desiredVolume}`);
+      return status();
+    });
+    return json(res, 200, result);
   }
-  if (url.pathname === "/api/status") return json(res, 200, await status());
+  if (url.pathname === "/api/status") {
+    const disconnected = new AbortController();
+    const closed = () => disconnected.abort();
+    res.once("close", closed);
+    try {
+      return json(res, 200, await publicStatus(AbortSignal.any([disconnected.signal, AbortSignal.timeout(8000)])));
+    } finally {
+      res.removeListener("close", closed);
+    }
+  }
   if (url.pathname === "/api/bands") {
     res.writeHead(200, {
       "content-type": "application/json; charset=utf-8",
@@ -841,7 +874,7 @@ server.listen(PORT, "127.0.0.1", async () => {
       return shutdown(1);
     }
     // Keep a cached status so health and the spectrum loop never wait on VLC.
-    setInterval(() => void refreshStatus(), 1000);
+    setInterval(pollStatus, 1000);
     await refreshStatus();
     const first = await scan();
     ready = true;

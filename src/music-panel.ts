@@ -29,7 +29,7 @@ export type MusicPanelHost = {
     stop(): Promise<unknown>;
     seek(seconds: number): Promise<unknown>;
     volume(value: number): Promise<unknown>;
-    status(): Promise<BridgeStatus | null>;
+    pollStatus(): Promise<BridgeStatus | null>;
     library(): Promise<BridgeTrack[]>;
     rescan(full?: boolean): Promise<BridgeScan | null>;
   };
@@ -210,7 +210,7 @@ export class MusicPanel {
     const request = this.playbackRequest;
     this.bridgeBusy = true;
     try {
-      const status = await this.host.bridge.status();
+      const status = await this.host.bridge.pollStatus();
       if (!this.currentBridgeRequest(request)) return;
       this.bridgeStatus = status;
       if (status) {

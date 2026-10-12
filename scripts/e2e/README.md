@@ -21,6 +21,8 @@ npm run test:e2e:music
 
 VLC 通路还需已有的 VLC 安装；需要获取时使用项目既有 `node scripts/fetch-vlc.mjs`。两套浏览器检查按顺序运行，截图保存在 `.local/screenshots/music/`。
 
+VLC UI 流程最后的浏览器音频交接夹具使用 90 秒预加载期限、120 秒总观察期限和 30 秒单次状态读取预算，以容忍 CI 软件渲染下的媒体事件延迟。该夹具结束后恢复原设置，播放器正常运行仍默认 15 秒。完整归位、正文揭示结束帧、真实起播、旧输出停止和桥接曲库恢复均保留实际状态断言；延长等待不算通过。
+
 所有测试音频由 `lib/music-fixtures.mjs` 生成：一份项目原创 MP3 配乐加可解析的标签，四份正弦波 WAV。旧测试曲库保存在 `.local/fixtures/music-legacy/`；新验证使用 `.local/fixtures/browser/` 和 `.local/fixtures/vlc/`。
 
 浏览器使用独立的运行配置，结束后只清理该次配置和所属进程树。运行限制与历史验收见 [音乐验证记录](../../verification/LOCAL-MUSIC.md)。

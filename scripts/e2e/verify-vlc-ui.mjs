@@ -514,11 +514,6 @@ try {
   if (results.some((result) => !result.ok))
     throw new Error(`VLC archive playback failed: ${JSON.stringify({ archiveStatus, archiveProgress })}`);
 
-  // The complete detail reveal has been verified. Return through the normal
-  // animation while exercising the remaining controls, so the browser engine
-  // handoff starts from the same archive surface as the browser-only suite.
-  await cdp.evaluate(`window.rhine.archive()`,false,20000);
-
   // Informational: issue another direct play and report what VLC does while the headless
   // page keeps rendering (this environment can starve VLC; bridge-only tests remain authoritative).
   const targetId = await cdp.evaluate(
@@ -753,16 +748,25 @@ try {
     mediaResume.resumed?.state === "playing" && mediaResume.resumed.currentId === mediaResume.id &&
     mediaResume.resumed.time >= 2 && !mediaResume.browser,JSON.stringify(mediaResume));
 
+  handoffStage = "switching VLC to browser";
+  console.log("handoff:", handoffStage);
   const toBrowser=await cdp.evaluate(`(async()=>{
     const m=window.rhine.music; const switched=await m.setEngine('browser');
     return {switched,engine:m.bridge().engine,playing:m.player.state().playing};
   })()`,true,60000);
+  console.log("handoff to browser:",JSON.stringify(toBrowser));
+  handoffStage = "confirming native VLC stopped";
+  console.log("handoff:", handoffStage);
   const vlcAfterSwitch=await nativeStatus();
   check("VLC 切浏览器前停止旧输出",toBrowser.switched && toBrowser.engine === "browser" &&
     !toBrowser.playing && vlcAfterSwitch.state === "stopped",JSON.stringify({toBrowser,vlcAfterSwitch}));
   if (!toBrowser.switched || toBrowser.engine !== "browser" || vlcAfterSwitch.state !== "stopped")
     throw new Error(`VLC handoff did not stop the old output: ${JSON.stringify({ toBrowser, vlcAfterSwitch })}`);
   await closeModal();
+  // Detail mode keeps the previously verified VLC controls on their original
+  // surface. Return normally only after output has been confirmed stopped;
+  // an active array wave under software rendering can otherwise starve them.
+  await cdp.evaluate(`window.rhine.archive()`,false,20000);
   handoffStage = "waiting for archive return";
   console.log("handoff:", handoffStage);
   const returnDeadline = Date.now() + 120000;

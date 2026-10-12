@@ -1882,8 +1882,11 @@ let lastTime = 0,
   fps = 0;
 let lastFrameMs = 0;
 function frame(ms: number) {
-  if (!wallpaperFrame(ms)) { requestAnimationFrame(frame); return; }
-  if (document.hidden) { requestAnimationFrame(frame); return; }
+  if (!wallpaperFrame(ms)) {
+    if (wallpaperHost()?.paused) scene?.resetFrameClock();
+    requestAnimationFrame(frame); return;
+  }
+  if (document.hidden) { scene?.resetFrameClock(); requestAnimationFrame(frame); return; }
   workbench?.tick();
   const musicDt = lastFrameMs ? Math.min(0.1, (ms - lastFrameMs) / 1000) : 0.016;
   lastFrameMs = ms;
@@ -1915,6 +1918,7 @@ function frame(ms: number) {
   wallpaperEffects?.update(time, motionIsReduced(), motionActive("pointerParallax"));
   // The calibrated 2D opening fully covers the scene until array entry.
   if (!viewer?.isOpen && (!cinema || cinema.time >= 21.9)) scene?.update(time, cinema);
+  else scene?.resetFrameClock();
   viewer?.update(time);
   if (threeState === "closing" && scene?.presentationHidden) releaseThree();
   playground?.position();
@@ -2189,6 +2193,7 @@ if (isWallpaper) {
   window.addEventListener("rhine-wallpaper-properties", event => apply((event as CustomEvent<WallpaperProperties>).detail));
   let pausedAt: number | undefined;
   const pause = () => {
+    scene?.resetFrameClock();
     const paused = wallpaperHost()?.paused ?? false;
     if (paused && pausedAt === undefined) pausedAt = performance.now();
     if (!paused && pausedAt !== undefined) {

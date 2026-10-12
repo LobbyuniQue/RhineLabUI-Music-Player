@@ -6,7 +6,7 @@ RhineLabUI 本地扩展工程，以三维档案阵列承载本地曲库，把歌
 
 开源仓库：[LobbyuniQue/RhineLabUI-Music-Player](https://github.com/LobbyuniQue/RhineLabUI-Music-Player)。
 
-功能迭代记录到 **2.5（2026-10-11）**，加入音乐按需准备与档案揭示同步，并完善内核切换、完整曲库搜索、扫描取消、封面回收和分层离线缓存。详细变更见 [版本记录](docs/releases/README.md)；这里的功能迭代编号与 `package.json` 中保留的 `1.0.0` 分开记录。
+当前版本为 **0.1.3（原 2.5）**，加入音乐按需准备与档案揭示同步，并完善内核切换、完整曲库搜索、扫描取消、封面回收和分层离线缓存。首次 GitHub 上传为 **0.1.1**，此前快照为 **0.0.1–0.0.10**；项目包元数据采用相同编号。详细关系见 [版本记录](docs/releases/README.md)。
 
 ## 当前功能
 
@@ -109,7 +109,11 @@ npm run start:all -- --root "D:\Music"
 - 封面对象 URL 使用默认 384 项缓存预算；可见封面、选中歌曲和正在使用的封面会保留，离开后可回收。全部条目都在使用时允许暂时超出预算。
 - 动画结束帧对齐的是播放调用。浏览器音频输出及 VLC 本地服务、声卡仍存在缓冲和通信延迟，不能承诺实际声波与屏幕帧严格同步。
 
-本轮验证见 [按需加载与播放同步验证](verification/MUSIC-ACCESS.md)；2.4 历史修复见 [音乐稳定性验证](verification/MUSIC-RELIABILITY.md)。
+本轮验证见 [按需加载与播放同步验证](verification/MUSIC-ACCESS.md)；0.1.2 历史修复见 [音乐稳定性验证](verification/MUSIC-RELIABILITY.md)。
+
+历史远端验收：[运行 38260385902](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/actions/runs/38260385902) 的基础检查、构建、VLC 获取校验、协议及浏览器集成通过；VLC UI 前 19 项通过后，完整归位在 240 秒截止时尚未完成，最后一项交接检查未执行，该次 Windows 集成未全部通过。
+
+2026-10-13 的活动时间与归位阶段修复及本轮实际验证见 [三维归位验证](verification/ARCHIVE-RETURN-TIMING.md)：本机计时回归 23/23、浏览器音乐 37/37、VLC UI 20/20。远端验收以 [对应提交的 Actions](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/actions/workflows/ci.yml) 为准，本机通过不等于远端通过。
 
 ## 开发、构建与检查
 

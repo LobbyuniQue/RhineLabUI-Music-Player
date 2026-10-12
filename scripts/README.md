@@ -14,7 +14,9 @@
 
 `npm run check` 同时执行播放请求竞态与方向映射、桥接断线/重连、可见封面复用、大分组反查及自有进程清理回归。专项脚本分别为 `check-music-player.mjs`、`check-music-bridge.mjs`、`check-archive-covers.mjs`、`check-owned-process.mjs`。
 
-2.5 增加 `check-music-library.mjs`（扫描事务、来源失效和封面租约）、`check-music-reveal.mjs`（加载黑条、结束帧起播和内核交接）、`check-pwa-cache.mjs` / `check-pwa-redirect.mjs`（核心与可选缓存、失败重试、版本隔离），均纳入 `npm run check`。`node --experimental-strip-types scripts/check-vlc-bridge.mjs` 单独验证真实 VLC 的静默准备、开始票据、停止、音量和频谱。
+0.1.3 增加 `check-music-library.mjs`（扫描事务、来源失效和封面租约）、`check-music-reveal.mjs`（加载黑条、结束帧起播和内核交接）、`check-pwa-cache.mjs` / `check-pwa-redirect.mjs`（核心与可选缓存、失败重试、版本隔离），均纳入 `npm run check`。`node --experimental-strip-types scripts/check-vlc-bridge.mjs` 单独验证真实 VLC 的静默准备、开始票据、停止、音量和频谱。
+
+`check-archive-timing.mjs` 纳入基础检查，直接验证生产归位运动代码在低帧率、长帧、暂停恢复及快速反向下的时间和阶段边界。绘制使用夹具，不作为 GPU 性能结果；真实场景和音乐交接另由端到端流程验证。见 [归位计时验证](../verification/ARCHIVE-RETURN-TIMING.md)。
 
 [e2e/](e2e/README.md) 存放持续使用的端到端验证；[diagnostics/](diagnostics/README.md) 存放针对问题的探针；`lib/` 存放共用的路径、音频样本生成和进程清理。
 

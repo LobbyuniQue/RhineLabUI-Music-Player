@@ -103,6 +103,12 @@ export function returnStep(angle: number, dt: number, reduced = false) {
   const next = angle * Math.exp(-dt * (reduced ? 35 : 7));
   return Math.abs(next) <= ALIGNMENT_EPSILON ? 0 : next;
 }
+// The exponential return is analytical. A long frame may contain both the end
+// of alignment and the start of insertion; only the remaining time may lower
+// the card, so frame rate never changes the order of those two phases.
+export function returnDuration(angle: number, reduced = false) {
+  return Math.max(0, Math.log(Math.abs(angle) / ALIGNMENT_EPSILON)) / (reduced ? 35 : 7);
+}
 export interface Spring {
   value: number;
   velocity: number;

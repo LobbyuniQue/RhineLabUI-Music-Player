@@ -770,8 +770,8 @@ try {
   await cdp.evaluate(`window.rhine.archive()`,false,20000);
   handoffStage = "waiting for archive return";
   console.log("handoff:", handoffStage);
-  // At roughly one software-rendered frame per second, the capped simulation
-  // timestep needs more than two wall-clock minutes for the full return.
+  // Observe the real settled state. Motion now consumes active elapsed time;
+  // the separate read budget still tolerates a slow software-rendered frame.
   const returned = await waitForArchiveReturn({
     read: timeoutMs => cdp.evaluate(`(() => {
       const stats=window.rhine.stats();

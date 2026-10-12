@@ -111,6 +111,8 @@ VLC UI 步骤总预算为 15 分钟，归位与播放观察分别保留 240 秒�
 
 本轮实际 `npm run test:e2e:vlc`（`RHINE_VLC_AOUT=dummy`）20/20 通过，日志 `.local/e2e-vlc-ci-archive-observer.log`。约 115 秒读取到归位 `cameraDetail=0/extraction=.4/returningFiles=0/motion=full`，本次没有出现查询超时；文件约 324 ms 返回，约 12 秒达到 `canplay`，约 13.9 秒完成起播。切回 VLC 现场 `before=true`，随后浏览器停止且桥接曲库恢复为 6 首。测试进程和端口已清理；远端完整结果仍须核对对应新提交的 Actions。
 
+对应远端运行 `38260385902`（提交 `844bc96698bfaa289277c807bbcf465143a0a92c`）的基础检查、构建、VLC 获取校验、协议 10 项及浏览器 37/37 通过，VLC UI 前 19 项通过。归位期间约 240 秒仅增加约 30 个渲染帧，截止前最后真实样本为 `cameraDetail=.014/extraction=.427/returningFiles=1/motion=full`，尚不满足原条件；整体预算到期时最后一次查询被截断，记录 1 次超时。失败现场再读为 `.012/.423/1`，动画仍未归位，浏览器音频尚未索引或准备，最后一项交接断言未执行。此次有界重试没有提前退出，也没有用旧状态伪造通过；实际低帧率导致动画未在总预算内完成的问题仍待解决。原始日志与证据为 `.local/github-ci-2.5-archive-observer-failed.log` 和 `.local/github-ci-2.5-archive-observer-evidence/`。
+
 ## 离线资源
 
 | 范围 | 文件数 | 字节数 | 体积 |

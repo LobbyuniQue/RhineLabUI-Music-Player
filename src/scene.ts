@@ -54,6 +54,7 @@ import {
   cinematicField,
   INSPECTION_LIFT,
   returnStep,
+  returnDuration,
 } from "./motion";
 
 const ease = (t: number) => {
@@ -228,6 +229,7 @@ export class ArchiveScene {
     lift: { value: number; velocity: number };
     returnY: number | null;
     clarity: number;
+    startedAt: number;
   }[] = [];
   private pulses: { row: number; lane: number; time: number }[] = [];
   private pendingPulse: ArchiveCell | null = null;
@@ -236,7 +238,14 @@ export class ArchiveScene {
   private targetDetail = 0;
   private reveal = 0;
   private targetReveal = 0;
-  private last = 0;
+  private last: number | null = null;
+  resetFrameClock() { this.last = null; }
+  private motionChangedAt = 0;
+  private markMotionChange() {
+    this.motionChangedAt = performance.now() / 1000;
+    this.clock = Math.max(this.clock, this.motionChangedAt);
+    this.lastInteraction = this.clock;
+  }
   private pointer = new THREE.Vector2();
   private dragging = false;
   private hoverCell: ArchiveCell | null = null;
@@ -641,7 +650,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
       }
       this.outgoing = [];
     }
-    this.lastInteraction = this.clock;
+    this.markMotionChange();
     this.targetReveal = mode === "hidden" ? 0 : 1;
     this.targetDetail = mode === "detail" ? 1 : 0;
     this.dragging = false;
@@ -771,7 +780,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
   select(index: number, navigation?: ArchiveNavigation) {
     if (!this.navigatingDrag) this.cancelPointer();
     this.setHover(null);
-    this.lastInteraction = this.clock;
+    this.markMotionChange();
     const next = fileLocation(index).slot;
     const canonical = fileLocation(index);
     const cell = this.looping
@@ -807,6 +816,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
         lift: { ...this.lift },
         returnY: group.rotation.y !== 0 ? group.position.y : null,
         clarity: this.modelClarity(),
+        startedAt: this.motionChangedAt,
       });
       this.lift.value = 0;
       this.lift.velocity = 0;
@@ -1312,6 +1322,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     window.addEventListener("blur", () => this.cancelPointer(), { signal: this.inputEvents.signal });
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) this.cancelPointer();
+      this.resetFrameClock();
     }, { signal: this.inputEvents.signal });
     window.addEventListener("resize", () => this.cancelPointer(), { signal: this.inputEvents.signal });
     // After multi-touch cancels capture, a finger can finish outside the canvas.
@@ -1324,8 +1335,14 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     time: number,
     cinematic?: { reveal: number; lift: number; zoom: number; time: number },
   ) {
-    const elapsed = Math.max(0, time - this.last || 0.016);
-    const dt = Math.min(elapsed, 0.05);
+    const previous = this.last;
+    const elapsed = previous === null ? 1 / 60 : Math.max(0, time - previous);
+    // Springs and exponential blends have exact, stable solutions. Clipping
+    // elapsed time here turns a slow GPU frame into a slower animation clock.
+    const dt = elapsed;
+    // A new target starts at the input event, not at the start of a potentially
+    // slow previous draw. Existing returning copies retain their own clocks.
+    const motionDt = previous === null ? dt : Math.max(0, time - Math.max(previous, this.motionChangedAt));
     this.last = time;
     this.clock = time;
     if (!this.loaded) return;
@@ -1337,14 +1354,17 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     this.renderer.domElement.style.opacity = String(THREE.MathUtils.clamp(this.presence / .16, 0, 1));
     this.theme.beginFrame();
     themeEnvironment(this.scene, this.renderer, this.themeAmount);
-    const blend = 1 - Math.exp(-dt * (this.motion.selectionTransition ? 2.8 : 35));
-    const detailBlend = 1 - Math.exp(-dt * (this.motion.detailTransition ? 2.8 : 35));
+    const blend = 1 - Math.exp(-motionDt * (this.motion.selectionTransition ? 2.8 : 35));
+    const loweringDt = !this.targetDetail && this.returnY !== null
+      ? Math.max(0, motionDt - returnDuration(this.rotation, !this.motion.detailTransition))
+      : motionDt;
+    const detailBlend = 1 - Math.exp(-loweringDt * (this.motion.detailTransition ? 2.8 : 35));
     this.reveal = cinematic
       ? cinematic.reveal
       : THREE.MathUtils.lerp(this.reveal, this.targetReveal, blend);
     this.rotation = this.targetDetail
       ? THREE.MathUtils.lerp(this.rotation, this.targetRotation, detailBlend)
-      : returnStep(this.rotation, dt, !this.motion.detailTransition);
+      : returnStep(this.rotation, motionDt, !this.motion.detailTransition);
     const shot = cinematic?.time ?? 29.1;
     if (cinematic) {
       this.scanTime = shot;
@@ -1377,12 +1397,12 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     const chosen = this.cellPosition(this.selectedCell);
     const selectedRow = this.selectedCell.row;
     const selectedLane = this.selectedCell.lane;
-    damp(this.shoulder, selectedRow, this.motion.selectionTransition ? 5 : 35, dt);
-    damp(this.laneFocus, selectedLane, this.motion.selectionTransition ? 4 : 35, dt);
+    damp(this.shoulder, selectedRow, this.motion.selectionTransition ? 5 : 35, motionDt);
+    damp(this.laneFocus, selectedLane, this.motion.selectionTransition ? 4 : 35, motionDt);
     // A held or freely coasting plane owns both tracks; selection cannot pull it.
     if (!this.holdingArchive && !momentum) {
-      damp(this.columnCamera, chosen.x, this.motion.selectionTransition ? 3.7 : 35, dt);
-      damp(this.rail, cinematic ? 0 : -2.17 - chosen.z, this.motion.selectionTransition ? 3.7 : 35, dt);
+      damp(this.columnCamera, chosen.x, this.motion.selectionTransition ? 3.7 : 35, motionDt);
+      damp(this.rail, cinematic ? 0 : -2.17 - chosen.z, this.motion.selectionTransition ? 3.7 : 35, motionDt);
     }
     if (momentum) {
       this.columnCamera.value = this.trackPosition("lane", momentum.motion.lane.value);
@@ -1501,11 +1521,12 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     };
     const selectedBase = chosen.y + field(selectedRow, selectedLane);
     if (!cinematic) {
-      if (this.returnY !== null && this.rotation !== 0) {
+      if (this.returnY !== null) {
         this.lift.value = this.returnY - selectedBase;
         this.lift.velocity = 0;
-      } else {
-        this.returnY = null;
+        if (this.rotation === 0) this.returnY = null;
+      }
+      if (this.returnY === null) {
         damp(
           this.lift,
           this.targetDetail
@@ -1525,7 +1546,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
                 this.lift.value < 0.4
               ? 7.6
               : 4.2,
-          dt,
+          loweringDt,
         );
       }
     }
@@ -1540,7 +1561,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     const detail = this.detail;
     // Keep the physical decryption timeline alive even when its model visuals
     // are disabled; the document mask uses the same timeline independently.
-    this.decryption.update(this.decryptionHeld ? 0 : dt, !this.decryptionHeld && detail > .78 && this.lift.value > 3.3, false,
+    this.decryption.update(this.decryptionHeld ? 0 : motionDt, !this.decryptionHeld && detail > .78 && this.lift.value > 3.3, false,
       cinematic ? shot + 5 : undefined);
     this.appearance.apply(this.model, ease(this.lift.value / 0.4));
     this.appearance.setClarity(this.model, this.modelClarity());
@@ -1554,12 +1575,17 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
       const o = this.outgoing[i];
       const p = this.cellPosition(o.cell);
       const baseY = p.y + field(o.cell.row, o.cell.lane);
-      o.group.rotation.y = returnStep(o.group.rotation.y, dt, !this.motion.detailTransition);
+      const copyDt = previous === null ? dt : Math.max(0, time - Math.max(previous, o.startedAt));
+      const insertionDt = o.returnY !== null
+        ? Math.max(0, copyDt - returnDuration(o.group.rotation.y, !this.motion.detailTransition))
+        : copyDt;
+      o.group.rotation.y = returnStep(o.group.rotation.y, copyDt, !this.motion.detailTransition);
       if (o.returnY !== null) {
         o.lift.value = o.returnY - baseY;
         o.lift.velocity = 0;
         if (o.group.rotation.y === 0) o.returnY = null;
-      } else damp(o.lift, 0, this.motion.detailTransition ? 4.5 : 35, dt);
+      }
+      if (o.returnY === null) damp(o.lift, 0, this.motion.detailTransition ? 4.5 : 35, insertionDt);
       o.group.position.set(
         p.x - trackX,
         baseY + o.lift.value + hoverLift(o.cell) - this.presentationDrop(o.cell),
@@ -1568,7 +1594,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
       const quality = ease(o.lift.value / 0.4);
       this.appearance.apply(o.group, quality);
       this.appearance.setTheme(o.group, this.theme.sample(o.cell, time), indexDim(o.lift.value));
-      o.clarity = this.motion.modelDecryption ? o.clarity * Math.exp(-dt * 9) : 0;
+      o.clarity = this.motion.modelDecryption ? o.clarity * Math.exp(-copyDt * 9) : 0;
       this.appearance.setClarity(o.group, o.clarity);
       const { row, lane } = o.cell;
       o.group.rotation.x =
@@ -1764,7 +1790,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     const cameraTransition = this.targetDetail || this.detail > 0.01
       ? this.motion.detailTransition
       : this.motion.selectionTransition;
-    const cameraBlend = cinematic ? 1 : cameraTransition ? 1 - Math.exp(-dt * 5) : 1;
+    const cameraBlend = cinematic ? 1 : cameraTransition ? 1 - Math.exp(-loweringDt * 5) : 1;
     this.camera.position.lerp(cameraPosition, cameraBlend);
     this.cameraAim.lerp(cameraAim, cameraBlend);
     this.camera.lookAt(this.cameraAim);

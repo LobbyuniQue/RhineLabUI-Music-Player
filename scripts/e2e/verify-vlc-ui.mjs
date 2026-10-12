@@ -769,13 +769,16 @@ try {
   await cdp.evaluate(`window.rhine.archive()`,false,20000);
   handoffStage = "waiting for archive return";
   console.log("handoff:", handoffStage);
-  const returnDeadline = Date.now() + 120000;
+  // At roughly one software-rendered frame per second, the capped simulation
+  // timestep needs more than two wall-clock minutes for the full return.
+  const returnDeadline = Date.now() + 240000;
   let returnState = null;
   while (Date.now() < returnDeadline) {
     returnState = await cdp.evaluate(`(() => {
       const stats=window.rhine.stats();
       return {mode:stats.mode,cameraDetail:stats.cameraDetail,extraction:stats.extraction,
-        returningFiles:stats.returningFiles,motion:stats.motion,
+        returningFiles:stats.returningFiles,motion:stats.motion,fps:stats.fps,
+        frames:stats.renderer.frames,reusedFrames:stats.renderer.reusedFrames,
         modal:!!document.querySelector('#modal-root [role="dialog"]')};
     })()`,false,20000);
     if (returnState.mode === "archive" && returnState.cameraDetail < .01 &&

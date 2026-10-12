@@ -140,6 +140,20 @@ function harness(t) {
     fetch(handler) {
       fetchHandler = handler;
     },
+    // A blocked page advances wall time without delivering queued tasks. Tests
+    // choose the first delivered task explicitly instead of replaying timers.
+    jump(ms) {
+      now += ms;
+    },
+    async runTimer(id) {
+      const timer = timers.get(id);
+      assert.ok(timer, `timer ${id} must still be pending`);
+      assert.ok(timer.at <= now, `timer ${id} must be due`);
+      if (timer.interval) timer.at = now + timer.interval;
+      else timers.delete(id);
+      timer.callback();
+      await flush();
+    },
     async tick(ms) {
       const end = now + ms;
       while (true) {
@@ -148,8 +162,8 @@ function harness(t) {
           .sort((a, b) => a[1].at - b[1].at)[0];
         if (!due) break;
         const [id, timer] = due;
-        now = timer.at;
-        if (timer.interval) timer.at += timer.interval;
+        now = Math.max(now, timer.at);
+        if (timer.interval) timer.at = now + timer.interval;
         else timers.delete(id);
         timer.callback();
         await flush();
@@ -427,6 +441,116 @@ test("a silent event stream times out and reconnects instead of remaining connec
   assert.equal(h.sources[0].closed, true);
   await h.tick(500);
   assert.equal(h.sources.length, 2);
+});
+
+test("a delayed watchdog lets queued stream frames preserve an in-flight preparation", async (t) => {
+  const h = harness(t);
+  await h.connect();
+  const preparing = deferred();
+  h.fetch((url) => url.includes("/api/prepare?") ? preparing.promise : Promise.resolve(response(status())));
+  const pending = h.bridge.prepare("a");
+  await flush();
+  const signal = h.calls.at(-1).options.signal;
+  const watchdog = [...h.timers].find(([, timer]) => timer.interval === 2500)[0];
+  // Deliver the late timer before an SSE message already queued during a stall.
+  h.jump(10000);
+  await h.runTimer(watchdog);
+  assert.equal(h.bridge.connected, true);
+  assert.equal(signal.aborted, false);
+  const recheck = [...h.timers].find(([, timer]) => !timer.interval && timer.at === 12500)[0];
+  assert.ok(recheck);
+  h.sources[0].send(Array(128).fill(0.3));
+  assert.equal(h.timers.has(recheck), false);
+  preparing.resolve(response({ ready: true, ticket: "ready-after-stall" }));
+  assert.equal(await pending, true);
+  await h.tick(2500);
+  assert.equal(h.bridge.connected, true);
+  assert.equal(h.bridge.prepared, true);
+  assert.equal(h.sources[0].closed, false);
+  assert.equal(h.bands.length, 1);
+  assert.deepEqual(h.connections.map((value) => value.connected), [true]);
+});
+
+test("a delayed watchdog still disconnects a silent stream after one bounded recheck", async (t) => {
+  const h = harness(t);
+  await h.connect();
+  const watchdog = [...h.timers].find(([, timer]) => timer.interval === 2500)[0];
+  h.jump(10000);
+  await h.runTimer(watchdog);
+  assert.equal(h.bridge.connected, true);
+  await h.tick(2499);
+  assert.equal(h.bridge.connected, true);
+  await h.tick(1);
+  assert.equal(h.bridge.connected, false);
+  assert.equal(h.sources[0].closed, true);
+  assert.match(h.bridge.error, /桥接事件流已中断/);
+  assert.deepEqual(h.connections.map((value) => value.connected), [true, false]);
+  await h.tick(500);
+  assert.equal(h.sources.length, 2);
+});
+
+test("repeated delayed watchdog callbacks cannot renew a silent stream's pending recheck", async (t) => {
+  const h = harness(t);
+  await h.connect();
+  const watchdog = [...h.timers].find(([, timer]) => timer.interval === 2500)[0];
+  h.jump(10000);
+  await h.runTimer(watchdog);
+  assert.equal(h.bridge.connected, true);
+  const [recheck, first] = [...h.timers].find(([, timer]) => !timer.interval && timer.at === 12500);
+  for (let i = 0; i < 3; i++) {
+    h.jump(10000);
+    await h.runTimer(watchdog);
+    assert.equal(h.bridge.connected, true);
+    assert.equal(h.timers.get(recheck), first);
+    assert.equal(first.at, 12500);
+  }
+  // The recheck itself is late too: it must decide instead of granting grace.
+  await h.runTimer(recheck);
+  assert.equal(h.bridge.connected, false);
+  assert.equal(h.sources[0].closed, true);
+  assert.equal(h.timers.has(watchdog), false);
+  assert.deepEqual(h.connections.map((value) => value.connected), [true, false]);
+});
+
+test("stream errors remain immediate while a delayed-watchdog recheck is pending", async (t) => {
+  const h = harness(t);
+  await h.connect();
+  const watchdog = [...h.timers].find(([, timer]) => timer.interval === 2500)[0];
+  h.jump(10000);
+  await h.runTimer(watchdog);
+  const recheck = [...h.timers].find(([, timer]) => !timer.interval && timer.at === 12500)[0];
+  h.sources[0].fail();
+  assert.equal(h.bridge.connected, false);
+  assert.equal(h.sources[0].closed, true);
+  assert.equal(h.timers.has(recheck), false);
+  assert.match(h.bridge.error, /本地桥接连接已中断/);
+});
+
+test("disconnect cancels pending rechecks and stale callbacks cannot affect a newer stream", async (t) => {
+  const h = harness(t);
+  await h.connect();
+  const oldSource = h.sources[0];
+  const watchdog = [...h.timers].find(([, timer]) => timer.interval === 2500)[0];
+  h.jump(10000);
+  await h.runTimer(watchdog);
+  const [recheck, timer] = [...h.timers].find(([, value]) => !value.interval && value.at === 12500);
+  h.bridge.disconnect();
+  assert.equal(h.timers.has(recheck), false);
+  assert.equal(h.timers.size, 0);
+  await h.connect();
+  const newerWatchdog = [...h.timers].find(([, value]) => value.interval === 2500)[0];
+  h.jump(10000);
+  await h.runTimer(newerWatchdog);
+  const newerRecheck = [...h.timers].find(([, value]) => !value.interval && value.at === 22500)[0];
+  timer.callback();
+  oldSource.send(Array(128).fill(1));
+  oldSource.fail();
+  assert.equal(h.bridge.connected, true);
+  assert.equal(h.sources[1].closed, false);
+  assert.equal(h.timers.has(newerRecheck), true);
+  assert.equal(h.bands.length, 0);
+  h.bridge.dispose();
+  assert.equal(h.timers.size, 0);
 });
 
 test("opening timeout retries; manual cancellation aborts probe retry delay", async (t) => {

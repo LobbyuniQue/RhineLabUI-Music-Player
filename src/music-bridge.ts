@@ -82,6 +82,7 @@ const PROBE_ATTEMPTS = 3;
 const RECONNECT_DELAY = 500;
 const MAX_RECONNECT_DELAY = 8000;
 const STREAM_STALE_AFTER = 7500;
+const STREAM_CHECK_INTERVAL = 2500;
 
 export class MusicBridge {
   private options: MusicBridgeOptions;
@@ -95,6 +96,7 @@ export class MusicBridge {
   private connectionTask: Promise<BridgeHealth | null> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private streamTimer: ReturnType<typeof setInterval> | null = null;
+  private streamRecheckTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = RECONNECT_DELAY;
   private streamOpen = false;
   private statusSequence = 0;
@@ -340,9 +342,11 @@ export class MusicBridge {
     this.streamOpen = false;
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     if (this.streamTimer !== null) clearInterval(this.streamTimer);
+    if (this.streamRecheckTimer !== null) clearTimeout(this.streamRecheckTimer);
     if (this.playbackTimer !== null) clearInterval(this.playbackTimer);
     this.reconnectTimer = null;
     this.streamTimer = null;
+    this.streamRecheckTimer = null;
     this.playbackTimer = null;
     this.pollTask = null;
   }
@@ -425,13 +429,32 @@ export class MusicBridge {
         this.lastError = "";
         this.reconnectDelay = RECONNECT_DELAY;
         lastFrame = Date.now();
+        let nextCheck = lastFrame + STREAM_CHECK_INTERVAL;
         this.streamTimer = setInterval(() => {
-          if (
-            this.current(generation) &&
-            Date.now() - lastFrame > STREAM_STALE_AFTER
-          )
+          if (!this.current(generation) || this.source !== source || !this.streamOpen)
+            return;
+          const now = Date.now();
+          const delayed = now - nextCheck >= STREAM_CHECK_INTERVAL;
+          nextCheck = now + STREAM_CHECK_INTERVAL;
+          if (this.streamRecheckTimer !== null || now - lastFrame <= STREAM_STALE_AFTER)
+            return;
+          if (!delayed) {
             this.connectionLost(generation, "桥接事件流已中断，正在重连");
-        }, 2500);
+            return;
+          }
+          // Missing an entire check interval can mean the page was blocked,
+          // with SSE tasks still queued behind this timer. Give those tasks one
+          // interval to run. This single recheck never renews its own deadline,
+          // even if its callback is delayed too; a silent stream still fails.
+          const recheck = setTimeout(() => {
+            if (this.streamRecheckTimer !== recheck) return;
+            this.streamRecheckTimer = null;
+            if (this.current(generation) && this.source === source && this.streamOpen &&
+              Date.now() - lastFrame > STREAM_STALE_AFTER)
+              this.connectionLost(generation, "桥接事件流已中断，正在重连");
+          }, STREAM_CHECK_INTERVAL);
+          this.streamRecheckTimer = recheck;
+        }, STREAM_CHECK_INTERVAL);
         finish(true);
         this.options.onConnectionChange?.(true, health);
         this.playbackTimer = setInterval(() => void this.pollStatus(), 750);
@@ -446,6 +469,8 @@ export class MusicBridge {
         )
           return;
         lastFrame = Date.now();
+        if (this.streamRecheckTimer !== null) clearTimeout(this.streamRecheckTimer);
+        this.streamRecheckTimer = null;
         try {
           const payload = JSON.parse(event.data) as { bands?: number[] };
           if (Array.isArray(payload.bands) && payload.bands.length === 128) {

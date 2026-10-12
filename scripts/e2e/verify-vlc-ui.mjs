@@ -778,7 +778,7 @@ try {
       const stats=window.rhine.stats();
       return {mode:stats.mode,cameraDetail:stats.cameraDetail,extraction:stats.extraction,
         returningFiles:stats.returningFiles,motion:stats.motion,fps:stats.fps,
-        frames:stats.renderer.frames,reusedFrames:stats.renderer.reusedFrames,
+        frames:stats.renderedFrames,reusedFrames:stats.reusedFrames,
         modal:!!document.querySelector('#modal-root [role="dialog"]')};
     })()`,false,20000);
     if (returnState.mode === "archive" && returnState.cameraDetail < .01 &&

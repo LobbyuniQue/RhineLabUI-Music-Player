@@ -25,6 +25,7 @@ import {
   sineWav,
 } from "../lib/music-fixtures.mjs";
 import { stopProcessTree } from "../lib/owned-process.mjs";
+import { CdpTimeoutError, waitForArchiveReturn } from "../lib/archive-return.mjs";
 
 const ROOT = PROJECT_ROOT;
 const DIST = DIST_DIR;
@@ -95,7 +96,7 @@ class Cdp {
       pending.timer = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
-          reject(new Error(`${method} timed out`));
+          reject(new CdpTimeoutError(method));
         }
       }, timeoutMs);
     });
@@ -771,26 +772,17 @@ try {
   console.log("handoff:", handoffStage);
   // At roughly one software-rendered frame per second, the capped simulation
   // timestep needs more than two wall-clock minutes for the full return.
-  const returnDeadline = Date.now() + 240000;
-  let returnState = null;
-  while (Date.now() < returnDeadline) {
-    returnState = await cdp.evaluate(`(() => {
+  const returned = await waitForArchiveReturn({
+    read: timeoutMs => cdp.evaluate(`(() => {
       const stats=window.rhine.stats();
       return {mode:stats.mode,cameraDetail:stats.cameraDetail,extraction:stats.extraction,
         returningFiles:stats.returningFiles,motion:stats.motion,fps:stats.fps,
         frames:stats.renderedFrames,reusedFrames:stats.reusedFrames,
         modal:!!document.querySelector('#modal-root [role="dialog"]')};
-    })()`,false,20000);
-    if (returnState.mode === "archive" && returnState.cameraDetail < .01 &&
-        returnState.extraction <= .41 && returnState.returningFiles === 0 && !returnState.modal)
-      break;
-    await sleep(1000);
-  }
-  console.log("handoff archive:",JSON.stringify(returnState));
-  if (returnState?.mode !== "archive" || !(returnState.cameraDetail < .01) ||
-      !(returnState.extraction <= .41) || returnState.returningFiles !== 0 || returnState.modal ||
-      returnState.motion.preset !== "full")
-    throw new Error(`Archive return did not finish before handoff: ${JSON.stringify(returnState)}`);
+    })()`,false,timeoutMs),
+    onProgress: observation => console.log("handoff archive progress:", JSON.stringify(observation)),
+  });
+  console.log("handoff archive:",JSON.stringify(returned));
   handoffStage = "indexing browser fixture";
   console.log("handoff:", handoffStage);
   const handoffId=await cdp.evaluate(`(async()=>{
@@ -867,10 +859,13 @@ try {
   console.log("harness error:", error.message, "handoff:", handoffStage);
   if (cdp) {
     const diagnostic = await cdp.evaluate(`(() => {
-      const m=window.rhine.music,b=m.bridge();
+      const m=window.rhine.music,b=m.bridge(),stats=window.rhine.stats();
       return {player:m.player.state(),access:m.access(),engine:b.engine,connected:b.connected,error:b.error,
         bridgeStatus:b.status,tracks:m.library.tracks.map(t=>({id:t.id,name:t.name,bridge:t.bridge})),
-        scene:window.rhine.stats().mode,modal:!!document.querySelector('#modal-root [role="dialog"]'),
+        scene:stats.mode,cameraDetail:stats.cameraDetail,extraction:stats.extraction,
+        returningFiles:stats.returningFiles,motion:stats.motion,fps:stats.fps,
+        frames:stats.renderedFrames,reusedFrames:stats.reusedFrames,
+        modal:!!document.querySelector('#modal-root [role="dialog"]'),
         handoffPlayback:window.__handoffPlayback ?? null};
     })()`,false,15000).catch(error => ({ error: error.message }));
     console.log("page failure state:",JSON.stringify(diagnostic));

@@ -99,6 +99,18 @@ VLC UI 步骤总预算为 15 分钟，归位与播放观察分别保留 240 秒�
 
 日志依次为 `.local/check-ci-vlc-status-final.log`、`.local/build-ci-vlc-status.log`、`.local/vlc-protocol-ci-status-real.log`、`.local/e2e-music-ci-vlc-status.log` 和 `.local/e2e-vlc-ci-vlc-status.log`。VLC 完整揭示结束帧仅发送一次起播；切浏览器回执成功，独立原生查询确认 `stopped/currentId=null`。完整归位为 `cameraDetail=0`、`extraction=.4`、`returningFiles=0`；浏览器文件约 66 ms 返回、约 11.6 秒达到 `canplay`、约 13.5 秒起播。切回 VLC 现场 `before=true`，随后浏览器停止且桥接曲库恢复为 6 首。产品 15 秒准备期限、完整动态效果与所有停止断言保留；该本地结果不替代对应提交的远端检查。
 
+## 归位观察的单次查询超时
+
+远端运行 `38199092771` 对应提交 `c11480b11642490d4799eee90a93ef342226dbd4` 的基础检查、构建、协议 10 项及浏览器 37/37 通过，VLC UI 前 19 项全部通过。切浏览器成功，独立原生查询确认 `stopped/time=0/currentId=null`。随后归位观察在约 194 秒时因 `Runtime.evaluate` 超时退出，240 秒整体归位预算尚未耗尽，最后一项双向交接断言尚未执行。
+
+失败现场是浏览器内核、档案阵列、弹窗已关闭，播放器未加载，尚无浏览器音频准备记录；当时没有记录完整归位坐标，不能据此宣称归位已经完成。桥接日志尾部另有两次状态读取失败，没有发生时间，不能作为此 CDP 超时的根因证据。原始日志保存在 `.local/github-ci-2.5-vlc-status-failed.log` 与 `.local/github-ci-2.5-vlc-status-evidence/ci/vlc-ui.log`。
+
+归位观察已提取为实际端到端调用使用的共享逻辑，只有明确标识的 `Runtime.evaluate` 传输超时可在原 240 秒预算内重试；每次查询与轮询间隔均受剩余预算限制。页面脚本异常、协议错误和写操作不重试；截止后的响应不能算通过，也不能沿用旧样本作为最终结论。成功仍须在截止前读取实时状态，满足 `cameraDetail<.01`、`extraction<=.41`、`returningFiles=0`、弹窗关闭及完整动态效果。进度与失败日志保留最后真实样本、已用时间、超时次数和实际场景坐标、帧率及帧计数。
+
+2026-10-12 确定性回归先使用原有单次超时即退出的观察行为，8 项中 5 项失败，复现提前退出与过期响应误判边界；修复后 8/8 通过。覆盖短暂超时后恢复、持续超时、动画未完成、截止后响应、不可重试错误和诊断保留。完整 `npm run check` 与 `npm run build` 通过，PWA 指纹仍为 `44c889a2ead50d7f`，产品代码、动画和音频准备期限未变。日志为 `.local/check-ci-archive-observer.log` 与 `.local/build-ci-archive-observer.log`。这些结果不替代实际 Windows 集成验证。
+
+本轮实际 `npm run test:e2e:vlc`（`RHINE_VLC_AOUT=dummy`）20/20 通过，日志 `.local/e2e-vlc-ci-archive-observer.log`。约 115 秒读取到归位 `cameraDetail=0/extraction=.4/returningFiles=0/motion=full`，本次没有出现查询超时；文件约 324 ms 返回，约 12 秒达到 `canplay`，约 13.9 秒完成起播。切回 VLC 现场 `before=true`，随后浏览器停止且桥接曲库恢复为 6 首。测试进程和端口已清理；远端完整结果仍须核对对应新提交的 Actions。
+
 ## 离线资源
 
 | 范围 | 文件数 | 字节数 | 体积 |

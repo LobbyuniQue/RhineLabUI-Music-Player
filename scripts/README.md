@@ -18,6 +18,8 @@
 
 `check-archive-timing.mjs` 纳入基础检查，直接验证生产归位运动代码在低帧率、长帧、暂停恢复及快速反向下的时间和阶段边界。绘制使用夹具，不作为 GPU 性能结果；真实场景和音乐交接另由端到端流程验证。见 [归位计时验证](../verification/ARCHIVE-RETURN-TIMING.md)。
 
+`check-handoff-render-budget.mjs` 验证端到端音频交接阶段的测试帧调度，包括昂贵回调后的空闲时间、原生时间戳、取消请求与调度恢复；不改生产渲染或播放器期限。
+
 [e2e/](e2e/README.md) 存放持续使用的端到端验证；[diagnostics/](diagnostics/README.md) 存放针对问题的探针；`lib/` 存放共用的路径、音频样本生成和进程清理。
 
 新验证工具从 `lib/workspace-paths.mjs` 取得项目路径；缓存和生成文件写入 `.local/`，需要长期保存的证据整理至 `verification/`。详见 [目录约定](../docs/PROJECT-STRUCTURE.md)。

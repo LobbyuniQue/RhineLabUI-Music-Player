@@ -26,6 +26,7 @@ import {
 } from "../lib/music-fixtures.mjs";
 import { stopProcessTree } from "../lib/owned-process.mjs";
 import { CdpTimeoutError, waitForArchiveReturn } from "../lib/archive-return.mjs";
+import { installHandoffRenderBudget } from "../lib/handoff-render-budget.mjs";
 
 const ROOT = PROJECT_ROOT;
 const DIST = DIST_DIR;
@@ -783,6 +784,10 @@ try {
     onProgress: observation => console.log("handoff archive progress:", JSON.stringify(observation)),
   });
   console.log("handoff archive:",JSON.stringify(returned));
+  // Geometry and full-motion return have already passed their real checks.
+  // Leave idle time after each frame only during the remaining audio handoff,
+  // so software rendering cannot continuously starve media/bridge tasks.
+  await cdp.evaluate(`(() => { window.__handoffRenderBudget=(${installHandoffRenderBudget.toString()})(750); return true; })()`,false,30000);
   handoffStage = "indexing browser fixture";
   console.log("handoff:", handoffStage);
   const handoffId=await cdp.evaluate(`(async()=>{
@@ -843,15 +848,61 @@ try {
     throw new Error(`Browser handoff fixture did not play: ${JSON.stringify(playback)}`);
   handoffStage = "switching back to VLC";
   console.log("handoff:", handoffStage);
+  const catalogueResponse = await fetch(`http://127.0.0.1:${PORT}/api/library`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!catalogueResponse.ok) throw new Error(`VLC catalogue HTTP ${catalogueResponse.status}`);
+  const catalogue = await catalogueResponse.json();
+  const expectedBridgeIds = catalogue.tracks.map(track => track.id).sort();
+  if (expectedBridgeIds.length !== expected + 1) throw new Error("VLC catalogue lost its reconnect fixture");
   const toVlc=await cdp.evaluate(`(async()=>{
     const m=window.rhine.music;
     const before=m.player.state().playing;
     const switched=await m.setEngine('vlc');
-    return {before,switched,engine:m.bridge().engine,browser:m.player.state().playing,
+    const bridge=m.bridge();
+    return {before,switched,engine:bridge.engine,browser:m.player.state().playing,
+      connected:bridge.connected,error:bridge.error,health:bridge.health,
       bridgeTracks:m.library.tracks.filter(t=>t.bridge).length};
   })()`,true,90000);
-  check("浏览器切 VLC 前停止旧输出并恢复桥接曲库",toVlc.before && toVlc.switched &&
-    toVlc.engine === "vlc" && !toVlc.browser && toVlc.bridgeTracks === expected+1,JSON.stringify(toVlc));
+  const browserStopped = toVlc.before && toVlc.switched && toVlc.engine === "vlc" && !toVlc.browser;
+  check("浏览器切 VLC 前停止旧输出",browserStopped,JSON.stringify(toVlc));
+  if (!browserStopped) throw new Error("Browser output did not stop during VLC handoff");
+
+  // Selecting VLC can succeed while its connection is still retrying. Observe
+  // the actual catalogue restoration without issuing another switch command.
+  handoffStage = "waiting for VLC catalogue restoration";
+  const catalogueStarted = Date.now(), catalogueDeadline = catalogueStarted + 180000;
+  let restoredCatalogue = null, nextCatalogueLog = 0;
+  const catalogueRestored = state => state?.engine === "vlc" && !state.browser &&
+    state.connected && state.ready === true && state.root === catalogue.root &&
+    state.healthTracks === expectedBridgeIds.length &&
+    JSON.stringify(state.ids) === JSON.stringify(expectedBridgeIds);
+  while (Date.now() < catalogueDeadline) {
+    try {
+      restoredCatalogue = await cdp.evaluate(`(() => {
+        const m=window.rhine.music,b=m.bridge(),stats=window.rhine.stats();
+        return {engine:b.engine,browser:m.player.state().playing,connected:b.connected,error:b.error,
+          ready:b.health?.ready ?? false,root:b.health?.root ?? '',healthTracks:b.health?.tracks ?? 0,
+          ids:m.library.tracks.filter(t=>t.bridge).map(t=>t.id).sort(),
+          frames:stats.renderedFrames,reusedFrames:stats.reusedFrames};
+      })()`,false,Math.min(30000,catalogueDeadline-Date.now()));
+    } catch (error) {
+      if (!(error instanceof CdpTimeoutError) || error.method !== "Runtime.evaluate") throw error;
+      console.log("handoff catalogue read timed out");
+    }
+    if (Date.now() >= catalogueDeadline) break;
+    if (restoredCatalogue?.browser) throw new Error("Browser output resumed while waiting for VLC");
+    if (catalogueRestored(restoredCatalogue)) break;
+    if (Date.now() >= nextCatalogueLog) {
+      console.log("handoff catalogue progress:",JSON.stringify({elapsedMs:Date.now()-catalogueStarted,state:restoredCatalogue}));
+      nextCatalogueLog = Date.now() + 15000;
+    }
+    await sleep(Math.min(1000,catalogueDeadline-Date.now()));
+  }
+  const catalogueObservation = {elapsedMs:Date.now()-catalogueStarted,state:restoredCatalogue};
+  check("切回 VLC 后自动连接并恢复真实桥接曲库",Date.now() < catalogueDeadline &&
+    catalogueRestored(restoredCatalogue),JSON.stringify(catalogueObservation));
 
   const failed = results.filter((r) => !r.ok);
   console.log(
@@ -878,6 +929,14 @@ try {
   console.log("bridge log tail:", bridgeLog.split("\n").slice(-6).join("\n"));
   process.exitCode = 1;
 } finally {
+  if (cdp) {
+    const renderBudget = await cdp.evaluate(`(() => {
+      const budget=window.__handoffRenderBudget;
+      if (!budget) return null;
+      const samples=budget.samples.slice(-6); budget.restore(); return samples;
+    })()`,false,15000).catch(error => ({error:error.message}));
+    if (renderBudget) console.log("handoff render budget:",JSON.stringify(renderBudget));
+  }
   await Promise.all([
     stopProcessTree(edge),
     stopProcessTree(server),

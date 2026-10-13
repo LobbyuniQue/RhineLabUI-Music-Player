@@ -27,6 +27,7 @@ import {
 import { stopProcessTree } from "../lib/owned-process.mjs";
 import { CdpTimeoutError, waitForArchiveReturn } from "../lib/archive-return.mjs";
 import { installHandoffRenderBudget } from "../lib/handoff-render-budget.mjs";
+import { observeAnimationFrame } from "../lib/observe-animation-frame.mjs";
 
 const ROOT = PROJECT_ROOT;
 const DIST = DIST_DIR;
@@ -551,23 +552,29 @@ try {
       title:document.querySelector('#detail-content h2')?.textContent?.trim(),
       starts:window.__reducedVlcStarts.length,frames:window.rhine.stats().renderedFrames};
   })()`,false,20000);
-  let reducedWaitingFrame=null;
-  const reducedFrameDeadline=Date.now()+15000;
+  // Reduced scenes may reuse a static WebGL frame. Sample a real animation
+  // callback while the actual prepare response remains gated, without
+  // requiring a redraw unrelated to the text/playback behavior being tested.
+  let reducedFrameObservation=null;
+  const reducedFrameDeadline=Date.now()+30000;
   while(Date.now()<reducedFrameDeadline) {
-    reducedWaitingFrame=await cdp.evaluate(`({access:window.rhine.music.access(),frames:window.rhine.stats().renderedFrames,
+    reducedFrameObservation=await cdp.evaluate(`(${observeAnimationFrame.toString()})(() => ({
+      access:window.rhine.music.access(),frames:window.rhine.stats().renderedFrames,
       prepares:window.__reducedPrepareRequests,starts:window.__reducedVlcStarts.length,
       masks:document.querySelectorAll('#detail-content .document-redaction-window').length,
-      held:document.querySelector('#detail-content').dataset.revealHeld})`,false,20000);
-    if((reducedWaitingFrame.frames>reducedWaiting.frames && reducedWaitingFrame.prepares===1) || reducedWaitingFrame.access.phase==="error") break;
+      held:document.querySelector('#detail-content').dataset.revealHeld}))`,true,Math.min(20000,reducedFrameDeadline-Date.now()));
+    if(reducedFrameObservation.snapshot.prepares===1 || reducedFrameObservation.snapshot.access.phase==="error") break;
     await sleep(200);
   }
+  const reducedWaitingFrame=reducedFrameObservation?.snapshot;
   check("VLC 简化动画点击加载立即显示文字，不创建黑条等待帧", reducedWaiting.motion.preset==="reduced" &&
     reducedWaiting.access.strategy==="immediate" && reducedWaiting.access.phase==="loading" &&
     reducedWaiting.access.startFrame===null && reducedWaiting.masks===0 && reducedWaiting.held==="false" &&
     reducedWaiting.title===archiveTarget.title && reducedWaiting.starts===0 &&
-    reducedWaitingFrame?.frames>reducedWaiting.frames && reducedWaitingFrame.access.phase==="loading" &&
+    Number.isFinite(reducedFrameObservation?.frameTime) && reducedWaitingFrame.access.phase==="loading" &&
+    reducedWaitingFrame.access.strategy==="immediate" && reducedWaitingFrame.access.startFrame===null &&
     reducedWaitingFrame.prepares===1 && reducedWaitingFrame.starts===0 && reducedWaitingFrame.masks===0 &&
-    reducedWaitingFrame.held==="false",JSON.stringify({initial:reducedWaiting,nextFrame:reducedWaitingFrame}));
+    reducedWaitingFrame.held==="false",JSON.stringify({initial:reducedWaiting,nextFrame:reducedFrameObservation}));
   await cdp.evaluate(`window.__releaseReducedPrepare()`,false,20000);
   let reducedStatus=null, reducedProgress=null;
   const reducedDeadline=Date.now()+120000;

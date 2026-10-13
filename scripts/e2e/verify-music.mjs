@@ -24,6 +24,8 @@ import {
   FIXTURE_ARTIST,
 } from "../lib/music-fixtures.mjs";
 import { stopProcessTree } from "../lib/owned-process.mjs";
+import { CdpTimeoutError, waitForArchiveReturn } from "../lib/archive-return.mjs";
+import { observeAnimationFrame } from "../lib/observe-animation-frame.mjs";
 
 const DIST = DIST_DIR;
 const FIXTURES = BROWSER_FIXTURES;
@@ -73,7 +75,7 @@ class Cdp {
       pending.timer = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
-          reject(new Error(`${method} timed out`));
+          reject(new CdpTimeoutError(method));
         }
       }, timeoutMs);
     });
@@ -709,23 +711,23 @@ try {
       title:document.querySelector('#detail-content h2')?.textContent?.trim(),
       starts:window.__startFrames.length-window.__reducedStartsBase,frames:window.rhine.stats().renderedFrames};
   })()`,false,20000);
-  let reducedWaitingFrame=null;
-  const reducedFrameDeadline=Date.now()+30000;
-  while(Date.now()<reducedFrameDeadline) {
-    reducedWaitingFrame=await cdp.evaluate(`({access:window.rhine.music.access(),frames:window.rhine.stats().renderedFrames,
+  // Static reduced scenes legitimately reuse their previous WebGL frame. Read
+  // after a real animation callback; no new 3D draw is needed to update text.
+  const reducedFrameObservation=await cdp.evaluate(`(${observeAnimationFrame.toString()})(() => ({
+      access:window.rhine.music.access(),state:window.rhine.music.player.state(),frames:window.rhine.stats().renderedFrames,
       masks:document.querySelectorAll('#detail-content .document-redaction-window').length,
       held:document.querySelector('#detail-content').dataset.revealHeld,
-      starts:window.__startFrames.length-window.__reducedStartsBase})`,false,20000);
-    if(reducedWaitingFrame.frames>reducedWaiting.frames || reducedWaitingFrame.access.phase==="error") break;
-    await sleep(200);
-  }
+      starts:window.__startFrames.length-window.__reducedStartsBase}))`,true,30000);
+  const reducedWaitingFrame=reducedFrameObservation.snapshot;
   check("简化动画点击加载立即显示文字，不创建黑条等待帧", reducedWaiting.motion.preset==="reduced" &&
     reducedWaiting.access.strategy==="immediate" && reducedWaiting.access.phase==="loading" &&
     reducedWaiting.access.startFrame===null && reducedWaiting.masks===0 && reducedWaiting.held==="false" &&
     reducedWaiting.title===archiveTarget.title && reducedWaiting.starts===0 && !reducedWaiting.state.playing &&
-    reducedWaitingFrame?.frames>reducedWaiting.frames && reducedWaitingFrame.access.phase==="loading" &&
-    reducedWaitingFrame.masks===0 && reducedWaitingFrame.held==="false" && reducedWaitingFrame.starts===0,
-    JSON.stringify({initial:reducedWaiting,nextFrame:reducedWaitingFrame}));
+    Number.isFinite(reducedFrameObservation.frameTime) && reducedWaitingFrame.access.phase==="loading" &&
+    reducedWaitingFrame.access.strategy==="immediate" && reducedWaitingFrame.access.startFrame===null &&
+    reducedWaitingFrame.masks===0 && reducedWaitingFrame.held==="false" && reducedWaitingFrame.starts===0 &&
+    !reducedWaitingFrame.state.playing,
+    JSON.stringify({initial:reducedWaiting,nextFrame:reducedFrameObservation}));
   await cdp.evaluate(`window.rhine.archive(); window.__releaseReducedFile(); window.rhine.music.library.file=window.__originalFile;
     window.rhine.music.player.hooks.preparationTimeoutMs=window.__reducedPreparationTimeout;`,false,20000);
   await sleep(800);
@@ -761,12 +763,25 @@ try {
   check("简化动画不等待揭示帧且只发出一次起播调用", reducedStartFrames.length===1 &&
     reducedStartFrames[0].phase==="starting" && reducedStartFrames[0].frame===null && reducedStartFrames[0].masks===0,
     JSON.stringify(reducedStartFrames));
+  // Playback is already verified. Stop the reactive music before restoring
+  // full motion and capturing the archive on a software-rendered CI host.
+  await cdp.evaluate(`window.rhine.music.player.stop()`,false,20000);
   await setMotionPreset("full");
   await cdp.evaluate(`window.rhine.archive()`, false, 20000);
-  await sleep(700);
+  const returnedForCapture=await waitForArchiveReturn({
+    read: timeoutMs => cdp.evaluate(`(() => {
+      const stats=window.rhine.stats();
+      return {mode:stats.mode,cameraDetail:stats.cameraDetail,extraction:stats.extraction,
+        returningFiles:stats.returningFiles,motion:stats.motion,fps:stats.fps,
+        frames:stats.renderedFrames,reusedFrames:stats.reusedFrames,
+        modal:!!document.querySelector('#modal-root [role="dialog"]')};
+    })()`,false,timeoutMs),
+    onProgress: observation => console.log("archive capture return progress:",JSON.stringify(observation)),
+  });
+  console.log("archive capture return:",JSON.stringify(returnedForCapture));
   await cdp.send("Emulation.setDeviceMetricsOverride", {
-    width: 1600,
-    height: 1000,
+    width: 960,
+    height: 600,
     deviceScaleFactor: 1,
     mobile: false,
   });

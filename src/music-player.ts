@@ -195,7 +195,7 @@ export class MusicPlayer {
     }
   }
 
-  /** Called by the final reveal frame: play is invoked before the first await. */
+  /** Called at readiness or the final reveal frame; play precedes the first await. */
   async startPrepared(): Promise<boolean> {
     if (this.disposed || !this.prepared || !this.current || !this.element.src) return false;
     const request = this.playRequest;

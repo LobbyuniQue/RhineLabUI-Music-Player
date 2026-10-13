@@ -516,6 +516,82 @@ try {
   if (results.some((result) => !result.ok))
     throw new Error(`VLC archive playback failed: ${JSON.stringify({ archiveStatus, archiveProgress })}`);
 
+  // Reduced motion uses the same authenticated preparation and real VLC
+  // process, but must not mask text or wait for the scene's reveal frame.
+  const setMotionPreset = async preset => {
+    await cdp.evaluate(`document.querySelector('[data-action="settings"]').click()`,false,20000);
+    await cdp.evaluate(`document.querySelector('[data-action="motion-preset"][data-preset="${preset}"]').click()`,false,20000);
+    await closeModal();
+  };
+  await setMotionPreset("reduced");
+  await cdp.evaluate(`window.rhine.archive(); window.rhine.music.bridgeStop()`,true,60000);
+  const beforeReduced=await nativeStatus();
+  if(beforeReduced.state!=="stopped" || beforeReduced.currentId!==null)
+    throw new Error(`previous VLC playback did not stop before reduced access: ${JSON.stringify(beforeReduced)}`);
+  const reducedWaiting=await cdp.evaluate(`(() => {
+    window.__reducedVlcStarts=[];window.__reducedPrepareRequests=0;
+    window.__reducedOriginalFetch=window.fetch;
+    const gate=new Promise(resolve=>{window.__releaseReducedPrepare=resolve;});
+    window.fetch=function(...args) {
+      const url=String(args[0]);
+      if(url.includes('/api/start?')) window.__reducedVlcStarts.push({
+        access:window.rhine.music.access(),motion:window.rhine.stats().motion,
+        masks:document.querySelectorAll('#detail-content .document-redaction-window').length});
+      const response=window.__reducedOriginalFetch.apply(this,args);
+      if(url.includes('/api/prepare?')) {
+        window.__reducedPrepareRequests++;
+        return response.then(async ready=>{await gate;return ready;});
+      }
+      return response;
+    };
+    document.querySelector('.read-file[data-action="open"]').click();
+    return {access:window.rhine.music.access(),motion:window.rhine.stats().motion,
+      masks:document.querySelectorAll('#detail-content .document-redaction-window').length,
+      held:document.querySelector('#detail-content').dataset.revealHeld,
+      title:document.querySelector('#detail-content h2')?.textContent?.trim(),
+      starts:window.__reducedVlcStarts.length,frames:window.rhine.stats().renderedFrames};
+  })()`,false,20000);
+  let reducedWaitingFrame=null;
+  const reducedFrameDeadline=Date.now()+15000;
+  while(Date.now()<reducedFrameDeadline) {
+    reducedWaitingFrame=await cdp.evaluate(`({access:window.rhine.music.access(),frames:window.rhine.stats().renderedFrames,
+      prepares:window.__reducedPrepareRequests,starts:window.__reducedVlcStarts.length,
+      masks:document.querySelectorAll('#detail-content .document-redaction-window').length,
+      held:document.querySelector('#detail-content').dataset.revealHeld})`,false,20000);
+    if((reducedWaitingFrame.frames>reducedWaiting.frames && reducedWaitingFrame.prepares===1) || reducedWaitingFrame.access.phase==="error") break;
+    await sleep(200);
+  }
+  check("VLC 简化动画点击加载立即显示文字，不创建黑条等待帧", reducedWaiting.motion.preset==="reduced" &&
+    reducedWaiting.access.strategy==="immediate" && reducedWaiting.access.phase==="loading" &&
+    reducedWaiting.access.startFrame===null && reducedWaiting.masks===0 && reducedWaiting.held==="false" &&
+    reducedWaiting.title===archiveTarget.title && reducedWaiting.starts===0 &&
+    reducedWaitingFrame?.frames>reducedWaiting.frames && reducedWaitingFrame.access.phase==="loading" &&
+    reducedWaitingFrame.prepares===1 && reducedWaitingFrame.starts===0 && reducedWaitingFrame.masks===0 &&
+    reducedWaitingFrame.held==="false",JSON.stringify({initial:reducedWaiting,nextFrame:reducedWaitingFrame}));
+  await cdp.evaluate(`window.__releaseReducedPrepare()`,false,20000);
+  let reducedStatus=null, reducedProgress=null;
+  const reducedDeadline=Date.now()+120000;
+  while(Date.now()<reducedDeadline) {
+    await sleep(500);
+    reducedStatus=await nativeStatus();
+    reducedProgress=await cdp.evaluate(`({access:window.rhine.music.access(),
+      prepares:window.__reducedPrepareRequests,starts:window.__reducedVlcStarts,
+      masks:document.querySelectorAll('#detail-content .document-redaction-window').length})`,false,20000);
+    if(reducedProgress.access.phase==="error" ||
+      (reducedStatus.currentId===archiveTarget.id && reducedStatus.state==="playing" && reducedProgress.access.phase==="playing")) break;
+  }
+  check("VLC 简化动画就绪后直接播放真实曲目 ID", reducedStatus?.currentId===archiveTarget.id &&
+    reducedStatus.state==="playing" && reducedProgress?.access.phase==="playing" &&
+    reducedProgress.access.strategy==="immediate" && reducedProgress.access.startFrame===null &&
+    reducedProgress.prepares===1 && reducedProgress.masks===0,JSON.stringify({reducedStatus,reducedProgress}));
+  check("VLC 简化动画不等待揭示帧且只发送一次起播请求", reducedProgress?.starts.length===1 &&
+    reducedProgress.starts[0].access.phase==="starting" && reducedProgress.starts[0].access.startFrame===null &&
+    reducedProgress.starts[0].masks===0 && reducedProgress.starts[0].motion.preset==="reduced",JSON.stringify(reducedProgress?.starts));
+  await cdp.evaluate(`window.fetch=window.__reducedOriginalFetch`,false,20000);
+  await setMotionPreset("full");
+  if(results.some(result=>!result.ok))
+    throw new Error(`reduced VLC archive playback failed: ${JSON.stringify({reducedStatus,reducedProgress})}`);
+
   // Informational: issue another direct play and report what VLC does while the headless
   // page keeps rendering (this environment can starve VLC; bridge-only tests remain authoritative).
   const targetId = await cdp.evaluate(

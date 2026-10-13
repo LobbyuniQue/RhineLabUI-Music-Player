@@ -74,7 +74,7 @@ export class DocumentDecryption {
   update(now: number, frame: DecryptionFrame, reduced: boolean, hold = false) {
     if (this.root) this.root.dataset.revealHeld = String(hold);
     if (hold) {
-      // Loading and errors keep the black masks intact, even with reduced motion.
+      // Only the full-animation playback policy requests a loading/error hold.
       if (this.progress !== 0) {
         this.progress = 0;
         this.refresh();

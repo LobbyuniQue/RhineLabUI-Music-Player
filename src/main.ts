@@ -37,7 +37,7 @@ import { MusicLibrary } from "./music-library";
 import { MusicPlayer } from "./music-player";
 import { MusicPanel } from "./music-panel";
 import { MusicBridge, type BridgeHealth, type BridgeStatus } from "./music-bridge";
-import { MusicRevealGate } from "./music-reveal";
+import { MusicRevealGate, musicAccessStrategy } from "./music-reveal";
 import { MusicEngineHandoff, type MusicEngine } from "./music-engine";
 import { decryptionFrame, DECRYPTION_END } from "./decryption";
 import { musicSettingsMarkup } from "./music-settings";
@@ -953,6 +953,7 @@ function savePrefs() {
     bookmarkFeedback?.cancel();
   }
   scene?.setMotion(prefs.motion);
+  syncMusicArchiveMotion();
   scene?.setTheme(prefs.colorTheme === "dark", !motionActive("surfaceTransitions") || !started);
   document.querySelectorAll<HTMLElement>("[data-color-theme]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.colorTheme === prefs.colorTheme)));
   scene?.setSuperPerformance(superPerformanceEnabled());
@@ -1195,7 +1196,7 @@ function syncMusicAccess() {
 function failMusicReveal(message: string, request = musicRevealRequest) {
   if (!musicReveal.isCurrent(request)) return;
   musicReveal.fail(request, message);
-  scene?.setDecryptionHeld(true);
+  scene?.setDecryptionHeld(musicReveal.holding);
   audio.setLocalMusicActive(musicPlayer.isPlaying() || bridgeStatus?.state === "playing");
   syncMusicAccess();
 }
@@ -1215,9 +1216,9 @@ function cancelMusicArchive(stopPrepared = true): Promise<void> {
 
 function prepareMusicArchive(track: LibraryTrack) {
   const stopped = cancelMusicArchive();
-  const request = musicRevealRequest = musicReveal.begin(track.id);
+  const request = musicRevealRequest = musicReveal.begin(track.id, musicAccessStrategy(prefs.motion));
   const engine = musicRevealEngine = prefs.musicEngine;
-  scene?.setDecryptionHeld(true);
+  scene?.setDecryptionHeld(musicReveal.holding);
   audio.setLocalMusicActive(true);
   syncMusicAccess();
   musicPlayer.queueTracks(musicLibrary.tracks.map(musicPlayerTrack));
@@ -1235,9 +1236,10 @@ function prepareMusicArchive(track: LibraryTrack) {
       failMusicReveal((engine === "vlc" ? musicBridge.error : musicPlayer.state().error) || "音乐未能加载，请重试或返回曲库", request);
       return;
     }
-    musicReveal.prepared(request);
+    if (!musicReveal.prepared(request)) return;
     scene?.setDecryptionHeld(false);
     syncMusicAccess();
+    if (musicReveal.immediate) startMusicArchive(request);
   }).catch(() => failMusicReveal("音乐未能加载，请重试或返回曲库", request));
   return request;
 }
@@ -1248,6 +1250,11 @@ function finishMusicRevealFrame(ms: number) {
     (!scene || scene.decryptionFrame.phase === "clear"), ms);
   if (request === null) return;
   // This call and the final text-mask update run in the same animation frame.
+  startMusicArchive(request);
+}
+
+function startMusicArchive(request: number) {
+  if (!musicReveal.isCurrent(request) || musicReveal.state().phase !== "starting") return;
   const start = musicRevealEngine === "vlc" ? musicBridge.startPrepared() : musicPlayer.startPrepared();
   syncMusicAccess();
   void start.then((ok) => {
@@ -1259,6 +1266,15 @@ function finishMusicRevealFrame(ms: number) {
   }).catch(() => failMusicReveal("音乐未能开始播放，请重试", request));
 }
 
+function syncMusicArchiveMotion() {
+  if (musicAccessStrategy(prefs.motion) !== "immediate") return;
+  const request = musicReveal.useImmediatePlayback();
+  scene?.setDecryptionHeld(musicReveal.holding);
+  if (musicReveal.immediate && mode === "detail") documentDecryption.reset($("#detail-content"), true);
+  syncMusicAccess();
+  if (request !== null) startMusicArchive(request);
+}
+
 function openFile() {
   if (!ready || engineHandoff.busy) return;
   const v = activeView();
@@ -1268,7 +1284,7 @@ function openFile() {
     if (request !== null && !musicReveal.isCurrent(request)) return;
     setMode("detail");
     if (track) {
-      documentDecryption.reset($("#detail-content"), false);
+      documentDecryption.reset($("#detail-content"), musicReveal.immediate);
       syncMusicAccess();
     }
     audio.play("open");
@@ -1317,8 +1333,8 @@ function renderDetail() {
   <div class="detail-footnote">${r.source ? `<a href="${escapeHtml(r.source)}" target="_blank" rel="noopener">设定参考 ↗</a>` : "<i></i>"}<span>${String(selected + 1).padStart(3, "0")} / ${String(v.records.length).padStart(3, "0")}</span></div>`;
   $("#detail-content").setAttribute("tabindex", "-1");
   if (!isMusic) $('[data-action="bookmark"]').setAttribute("aria-pressed", String(saved.has(r.id)));
-  documentDecryption.reset($("#detail-content"), !musicReveal.pending && !musicReveal.holding &&
-    (!motionActive("documentReveal") || !scene || scene.decryptionFrame.phase === "clear"));
+  documentDecryption.reset($("#detail-content"), musicReveal.immediate || (!musicReveal.blocking &&
+    (!motionActive("documentReveal") || !scene || scene.decryptionFrame.phase === "clear")));
   setTab(activeTab, false);
 }
 function overview() {
@@ -1495,7 +1511,10 @@ function updateQualitySummary() {
 function motionPreferenceNoteMarkup() {
   const preset = prefs.motionPreset;
   const allEnabled = Object.values(prefs.motion).every(Boolean);
-  return `<div id="motion-preference-note" class="motion-preference-note"><p>${motionSummary(prefs.motion)}</p><span>预设：${preset === "full" ? "完整动画" : preset === "reduced" ? "减少动画" : "自定义"} · 选择会保存在本站</span>${allEnabled ? "" : '<button data-action="enable-motion">启用完整动画并重播 ↻</button>'}</div>`;
+  const musicAccess = musicAccessStrategy(prefs.motion) === "immediate"
+    ? "音乐档案：文字直接显示，加载就绪即播放。"
+    : "音乐档案：加载后揭示，动画结束时播放。";
+  return `<div id="motion-preference-note" class="motion-preference-note"><p>${motionSummary(prefs.motion)}</p><p>${musicAccess}</p><span>预设：${preset === "full" ? "完整动画" : preset === "reduced" ? "减少动画" : "自定义"} · 选择会保存在本站</span>${allEnabled ? "" : '<button data-action="enable-motion">启用完整动画并重播 ↻</button>'}</div>`;
 }
 function settingsMarkup() {
   return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro">JOYCE MOORE <span>·</span> SESSION AUTHORIZED</p>${isWallpaper ? '<p class="wallpaper-settings-note">每次启动都会读取 Wallpaper Engine 中的设置。在此修改仅对当前运行生效，无法持久保存；如需保留，请在 Wallpaper Engine 的壁纸属性中调整。</p>' : ""}<div class="settings-list">${themeSettingsMarkup(prefs.colorTheme === "dark")}${!isWallpaper ? `<label><div><strong>SUPER PERFORMANCE</strong><span>降低三维画质和渲染分辨率，保留完整动效；关闭后恢复原画质</span></div><input type="checkbox" data-pref="superPerformance" ${prefs.superPerformance ? "checked" : ""}/><i class="toggle"></i></label>` : ""}${workbench?.settingsMarkup() ?? ""}${audioSettingsMarkup(prefs)}${musicSettingsMarkup(musicLibrary, musicSettingsState())}</div>${motionPreferenceNoteMarkup()}${motionSettingsMarkup(prefs.motion, prefs.motionPreset)}${qualityMarkup(prefs.rendering)}${pwaSettingsMarkup()}<div class="settings-shortcuts">${isWallpaper ? '<span>DESKTOP CONTROLS</span><p>拖动阵列或点击界面按钮浏览档案。桌面模式下，方向键与滚轮可能无法传入壁纸。</p>' : '<span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p>'}</div><div class="settings-bottom">${!isWallpaper && document.fullscreenEnabled ? '<button data-action="fullscreen">FULLSCREEN <span>↗</span></button>' : ''}<button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="${assetUrl("fonts/MiSans-license.pdf")}" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
@@ -1924,13 +1943,13 @@ function frame(ms: number) {
   playground?.position();
   if (mode === "detail") {
     documentDecryption.update(time, scene?.decryptionFrame ?? decryptionFrame(DECRYPTION_END),
-      !motionActive("documentReveal") || !scene, musicReveal.holding);
+      musicReveal.immediate || !motionActive("documentReveal") || !scene, musicReveal.holding);
     const visibility = scene?.detailVisibility ?? 1;
     $("#detail-content").style.opacity = String(visibility);
     $("#detail-content").style.translate =
       `0 ${(1 - visibility) * 18}px`;
-    $("#detail-content").inert = visibility < 0.1 || musicReveal.pending || musicReveal.holding;
-    if (pendingDetailFocus && visibility >= 0.1 && !musicReveal.pending && !musicReveal.holding && !modal && !viewer?.isOpen) {
+    $("#detail-content").inert = visibility < 0.1 || musicReveal.blocking;
+    if (pendingDetailFocus && visibility >= 0.1 && !musicReveal.blocking && !modal && !viewer?.isOpen) {
       $("#detail-content").focus({ preventScroll: true });
       pendingDetailFocus = false;
     }
@@ -2010,7 +2029,7 @@ function releaseThree() {
     $("#detail-content").style.opacity = "1";
     $("#detail-content").style.translate = "0 0";
     $("#detail-content").inert = false;
-    documentDecryption.reset($("#detail-content"), !musicReveal.pending && !musicReveal.holding);
+    documentDecryption.reset($("#detail-content"), !musicReveal.blocking);
   }
   threeState = "off"; syncThreeButton();
   $("#hover-label").hidden = true;

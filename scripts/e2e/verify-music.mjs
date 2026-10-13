@@ -679,6 +679,89 @@ try {
   const frameStart = await cdp.evaluate(`window.__startFrames`,false,20000);
   check("文字揭示结束帧只发出一次起播调用", frameStart.length === 1 && frameStart[0].phase === "starting" &&
     frameStart[0].frame > 0 && frameStart[0].masks === 0, JSON.stringify(frameStart));
+
+  // Exercise the actual animation setting, then keep file resolution pending.
+  // Reduced playback must show clear text before audio becomes ready; it must
+  // retain cancellation and retry without borrowing the reveal's final frame.
+  const setMotionPreset = async preset => {
+    await cdp.evaluate(`document.querySelector('[data-action="settings"]').click()`, false, 20000);
+    await cdp.evaluate(`document.querySelector('[data-action="motion-preset"][data-preset="${preset}"]').click(); window.rhine.music.close();`, false, 20000);
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      if (await cdp.evaluate(`!document.querySelector('#modal-root [role="dialog"]') && !document.querySelector('.system-nav').inert`, false, 20000)) return;
+      await sleep(200);
+    }
+    throw new Error(`Motion settings did not close after choosing ${preset}`);
+  };
+  await setMotionPreset("reduced");
+  const reducedWaiting = await cdp.evaluate(`(() => {
+    const music=window.rhine.music;
+    window.rhine.archive(); music.player.stop();
+    window.__reducedStartsBase=window.__startFrames.length;
+    window.__reducedPreparationTimeout=music.player.hooks.preparationTimeoutMs;
+    music.player.hooks.preparationTimeoutMs=60000;
+    const gate=new Promise(resolve=>{window.__releaseReducedFile=resolve;});
+    music.library.file=async track=>{await gate;return window.__originalFile(track);};
+    document.querySelector('.read-file[data-action="open"]').click();
+    return {access:music.access(),state:music.player.state(),motion:window.rhine.stats().motion,
+      masks:document.querySelectorAll('#detail-content .document-redaction-window').length,
+      held:document.querySelector('#detail-content').dataset.revealHeld,
+      title:document.querySelector('#detail-content h2')?.textContent?.trim(),
+      starts:window.__startFrames.length-window.__reducedStartsBase,frames:window.rhine.stats().renderedFrames};
+  })()`,false,20000);
+  let reducedWaitingFrame=null;
+  const reducedFrameDeadline=Date.now()+30000;
+  while(Date.now()<reducedFrameDeadline) {
+    reducedWaitingFrame=await cdp.evaluate(`({access:window.rhine.music.access(),frames:window.rhine.stats().renderedFrames,
+      masks:document.querySelectorAll('#detail-content .document-redaction-window').length,
+      held:document.querySelector('#detail-content').dataset.revealHeld,
+      starts:window.__startFrames.length-window.__reducedStartsBase})`,false,20000);
+    if(reducedWaitingFrame.frames>reducedWaiting.frames || reducedWaitingFrame.access.phase==="error") break;
+    await sleep(200);
+  }
+  check("简化动画点击加载立即显示文字，不创建黑条等待帧", reducedWaiting.motion.preset==="reduced" &&
+    reducedWaiting.access.strategy==="immediate" && reducedWaiting.access.phase==="loading" &&
+    reducedWaiting.access.startFrame===null && reducedWaiting.masks===0 && reducedWaiting.held==="false" &&
+    reducedWaiting.title===archiveTarget.title && reducedWaiting.starts===0 && !reducedWaiting.state.playing &&
+    reducedWaitingFrame?.frames>reducedWaiting.frames && reducedWaitingFrame.access.phase==="loading" &&
+    reducedWaitingFrame.masks===0 && reducedWaitingFrame.held==="false" && reducedWaitingFrame.starts===0,
+    JSON.stringify({initial:reducedWaiting,nextFrame:reducedWaitingFrame}));
+  await cdp.evaluate(`window.rhine.archive(); window.__releaseReducedFile(); window.rhine.music.library.file=window.__originalFile;
+    window.rhine.music.player.hooks.preparationTimeoutMs=window.__reducedPreparationTimeout;`,false,20000);
+  await sleep(800);
+  const reducedCancelled=await cdp.evaluate(`({access:window.rhine.music.access(),playing:window.rhine.music.player.state().playing,
+    starts:window.__startFrames.length-window.__reducedStartsBase,mode:window.rhine.stats().mode})`,false,20000);
+  check("简化动画返回后延迟加载完成也不能起播", reducedCancelled.access.phase==="idle" &&
+    !reducedCancelled.playing && reducedCancelled.starts===0 && reducedCancelled.mode==="archive",JSON.stringify(reducedCancelled));
+  await cdp.evaluate(`window.rhine.music.library.file=async()=>{throw Error('Synthetic reduced unavailable file');};
+    document.querySelector('.read-file[data-action="open"]').click();`,false,20000);
+  await sleep(800);
+  const reducedError=await cdp.evaluate(`({access:window.rhine.music.access(),
+    retry:!document.querySelector('[data-action="retry-music-access"]').hidden,
+    masks:document.querySelectorAll('#detail-content .document-redaction-window').length,
+    held:document.querySelector('#detail-content').dataset.revealHeld,playing:window.rhine.music.player.state().playing})`,false,20000);
+  check("简化动画加载失败保留清晰文字和重试入口", reducedError.access.phase==="error" &&
+    reducedError.access.strategy==="immediate" && reducedError.retry && reducedError.masks===0 &&
+    reducedError.held==="false" && !reducedError.playing,JSON.stringify(reducedError));
+  await cdp.evaluate(`window.rhine.music.library.file=window.__originalFile;
+    document.querySelector('[data-action="retry-music-access"]').click();`,false,20000);
+  let reducedPlayback=null;
+  const reducedDeadline=Date.now()+120000;
+  while(Date.now()<reducedDeadline) {
+    reducedPlayback=await cdp.evaluate(`({access:window.rhine.music.access(),state:window.rhine.music.player.state(),
+      masks:document.querySelectorAll('#detail-content .document-redaction-window').length})`,false,20000);
+    if(reducedPlayback.state.playing || reducedPlayback.access.phase==="error") break;
+    await sleep(500);
+  }
+  check("简化动画音乐就绪后直接播放对应曲目", reducedPlayback?.state.id===archiveTarget.id &&
+    reducedPlayback.state.playing && !reducedPlayback.state.loading && reducedPlayback.access.phase==="playing" &&
+    reducedPlayback.access.strategy==="immediate" && reducedPlayback.access.startFrame===null && reducedPlayback.masks===0,
+    JSON.stringify(reducedPlayback));
+  const reducedStartFrames=await cdp.evaluate(`window.__startFrames.slice(window.__reducedStartsBase)`,false,20000);
+  check("简化动画不等待揭示帧且只发出一次起播调用", reducedStartFrames.length===1 &&
+    reducedStartFrames[0].phase==="starting" && reducedStartFrames[0].frame===null && reducedStartFrames[0].masks===0,
+    JSON.stringify(reducedStartFrames));
+  await setMotionPreset("full");
   await cdp.evaluate(`window.rhine.archive()`, false, 20000);
   await sleep(700);
   await cdp.send("Emulation.setDeviceMetricsOverride", {

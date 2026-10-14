@@ -221,6 +221,62 @@ function transportHarness(h) {
   };
 }
 
+test("playlist switching authenticates POST and rejects a late previous catalogue", async t => {
+  const h = harness(t);
+  await h.connect();
+  const gate = deferred();
+  const playlist = { root: "new-folder", part: 1, total: 1001, parts: 2, limit: 1000, split: true, needsSplit: false };
+  h.fetch(async (raw, options) => {
+    const path = new URL(raw).pathname;
+    if (path === "/api/library") return gate.promise;
+    if (path === "/api/playlist") {
+      assert.equal(options.method, "POST");
+      assert.equal(options.headers.authorization, "Bearer test-token");
+      assert.equal(options.headers["content-type"], "application/json");
+      assert.deepEqual(JSON.parse(options.body), { root: "new-folder", part: 1, split: true });
+      return response({ root: playlist.root, playlist, tracks: [{ id: "new" }] });
+    }
+    return response(status());
+  });
+  const previous = h.bridge.library();
+  const rejected = assert.rejects(previous, /旧歌单请求已失效/);
+  const result = await h.bridge.switchPlaylist("new-folder", 1, true);
+  gate.resolve(response({ root: "old-folder", tracks: [{ id: "old" }] }));
+  await rejected;
+  assert.equal(result.tracks[0].id, "new");
+  assert.equal(h.bridge.info.root, "new-folder");
+  assert.equal(h.bridge.info.playlist.part, 1);
+});
+
+test("playlist limit response preserves connection and exposes the choice details", async t => {
+  const h = harness(t);
+  await h.connect();
+  const old = h.bridge.info;
+  h.fetch(async () => response({ error: "playlist_limit", total: 1001, parts: 2, limit: 1000 }, 409));
+  await assert.rejects(h.bridge.switchPlaylist("large-folder"), error => error.status === 409 && error.payload.total === 1001 && error.payload.parts === 2);
+  assert.equal(h.bridge.info, old);
+  assert.equal(h.bridge.connected, true);
+});
+
+test("a late rescan cannot replace the selected volume after a playlist switch", async t => {
+  const h = harness(t);
+  await h.connect();
+  const gate = deferred();
+  const playlist = { root: "B", part: 1, total: 1001, parts: 2, limit: 1000, split: true, needsSplit: false };
+  h.fetch(async raw => {
+    if (new URL(raw).pathname === "/api/scan") return gate.promise;
+    return response({ root: "B", playlist, tracks: [] });
+  });
+  const pending = h.bridge.rescan();
+  const rejected = assert.rejects(pending, /旧歌单请求已失效/);
+  await h.bridge.switchPlaylist("B", 1, true);
+  gate.resolve(response({ scan: health.scan, playlist: { ...playlist, root: "A", part: 0 } }));
+  await rejected;
+  assert.equal(h.bridge.info.root, "B");
+  assert.equal(h.bridge.info.playlist.root, "B");
+  assert.equal(h.bridge.info.playlist.part, 1);
+});
+
 test("connection requires an open event stream and shares concurrent probes", async (t) => {
   const h = harness(t);
   const first = h.bridge.connect();

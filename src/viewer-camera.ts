@@ -80,6 +80,9 @@ export class ViewerCameraMotion {
     );
     this.pose.phi = THREE.MathUtils.lerp(from.phi, to.phi, angle);
     this.pose.theta = from.theta + shortestAngle(to.theta - from.theta) * angle;
+    if (Math.abs(Math.log(this.pose.radius / to.radius)) < 1e-8) this.pose.radius = to.radius;
+    if (Math.abs(this.pose.phi - to.phi) < 1e-8) this.pose.phi = to.phi;
+    if (Math.abs(shortestAngle(this.pose.theta - to.theta)) < 1e-8) this.pose.theta = to.theta;
     this.pose.makeSafe();
   }
 

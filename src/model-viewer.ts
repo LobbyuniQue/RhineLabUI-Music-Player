@@ -12,6 +12,7 @@ import {
   resizeQuality,
 } from "./quality-renderer";
 import { fullMotion, type MotionPreferences } from "./motion-preferences";
+import { RenderState } from "./render-state";
 
 const PARTS = [
   { id: "fasteners", label: "紧固件", en: "FASTENERS", depth: 2.75 },
@@ -37,7 +38,12 @@ export class ModelViewer {
   private pipeline: ReturnType<typeof createViewerPipeline>;
   private quality = normalizeQuality(undefined);
   private superPerformance = false;
+  private renderState = new RenderState();
+  private renderedFrames = 0;
+  private reusedFrames = 0;
+  private inputEvents = new AbortController();
   dispose() {
+    this.inputEvents.abort();
     this.request++;
     if (this.isOpen) this.finishClose();
     this.controls.dispose();
@@ -127,6 +133,8 @@ export class ModelViewer {
       "档案三维模型：拖动旋转，方向键平移，滚轮或加减键缩放，Home 复位",
     );
     this.canvasHost.appendChild(this.renderer.domElement);
+    this.renderer.domElement.addEventListener("webglcontextrestored", () => this.renderState.invalidate(), { signal: this.inputEvents.signal });
+    document.addEventListener("visibilitychange", () => this.resetFrameClock(), { signal: this.inputEvents.signal });
     this.scene.background = new THREE.Color("#eae5e1");
     this.scene.fog = new THREE.Fog("#eae5e1", 13.5, 26.5);
     // Render-target textures belong to their WebGL context. Recreate the main
@@ -420,6 +428,7 @@ export class ModelViewer {
     }
   }
   private setSurface(clear: boolean) {
+    this.lastTime = performance.now() / 1000;
     this.targetClarity = clear ? 1 : 0;
     this.root.dataset.surface = clear ? "clear" : "frosted";
     this.root.querySelector('[data-viewer="clear"]')!.setAttribute("aria-pressed", String(clear));
@@ -427,6 +436,7 @@ export class ModelViewer {
     if (!this.motion.viewerModelTransition) this.clarity = { value: this.targetClarity, velocity: 0 };
   }
   private setExploded(value: boolean) {
+    this.lastTime = performance.now() / 1000;
     this.targetSpread = value ? 1 : 0;
     this.root.dataset.exploded = String(value);
     this.root
@@ -447,6 +457,7 @@ export class ModelViewer {
     }
   }
   private resetView(animated = true) {
+    this.lastTime = performance.now() / 1000;
     this.controls.enabled = false;
     this.controls.enableDamping = false;
     this.controls.update();
@@ -460,6 +471,7 @@ export class ModelViewer {
       this.isOpen && !this.loading && Boolean(this.source);
   }
   private interruptReset() {
+    this.lastTime = performance.now() / 1000;
     if (!this.cameraMotion.resetting) return;
     this.cameraMotion.interruptReset(this.controlCamera, this.controls.target);
     this.controls.update();
@@ -559,6 +571,7 @@ export class ModelViewer {
 
   resize() {
     if (!this.isOpen) return;
+    this.renderState.invalidate();
     const width = this.canvasHost.clientWidth,
       height = this.canvasHost.clientHeight;
     resizeQuality(
@@ -579,11 +592,13 @@ export class ModelViewer {
       : "<span>拖动旋转</span><span>↑ ↓ ← → 平移</span><span>滚轮缩放</span>";
   }
 
+  resetFrameClock() { this.lastTime = 0; }
+
   update(time: number) {
     if (!this.isOpen) return;
     themeEnvironment(this.scene, this.renderer, this.themeAmount);
     this.source?.model.traverse(child => { if (child.userData.themeAmount) child.userData.themeAmount.value = this.themeAmount; });
-    const dt = Math.min(this.lastTime ? time - this.lastTime : 1 / 60, 0.05);
+    const dt = this.lastTime ? Math.max(0, time - this.lastTime) : 1 / 60;
     this.lastTime = time;
     if (this.source) {
       damp(this.clarity, this.targetClarity, 8, dt);
@@ -624,10 +639,42 @@ export class ModelViewer {
     const objectDistance = this.camera.position.length();
     fog.near = Math.max(0, objectDistance - 1);
     fog.far = objectDistance + 12;
+    // Keep controls and motion live; a settled model can reuse the existing canvas.
+    this.scene.updateMatrixWorld();
+    this.camera.updateMatrixWorld();
+    const state = this.renderState;
+    state.begin();
+    state.add(this.appliedQuality, Number(this.superPerformance), Number(this.cameraMotion.resetting), Number(Boolean(this.source)));
+    state.floats(...this.camera.projectionMatrix.elements, ...this.camera.matrixWorldInverse.elements,
+      this.themeAmount, this.clarity.value, this.targetClarity, this.spread.value, this.targetSpread, fog.near, fog.far);
+    this.scene.traverse(object => {
+      state.add(object.id, Number(object.visible));
+      if (!(object instanceof THREE.Mesh)) return;
+      object.modelViewMatrix.multiplyMatrices(this.camera.matrixWorldInverse, object.matrixWorld);
+      object.normalMatrix.getNormalMatrix(object.modelViewMatrix);
+      state.floats(...object.matrixWorld.elements, ...object.modelViewMatrix.elements, ...object.normalMatrix.elements);
+      state.add(object.geometry.id);
+      for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+        const mat = material as THREE.MeshPhysicalMaterial;
+        state.add(mat.uuid);
+        state.floats(mat.opacity, mat.roughness, mat.metalness, mat.transmission, mat.thickness,
+          mat.attenuationDistance, mat.clearcoat, mat.clearcoatRoughness,
+          mat.color?.r, mat.color?.g, mat.color?.b,
+          mat.attenuationColor?.r, mat.attenuationColor?.g, mat.attenuationColor?.b);
+        for (const texture of Object.values(mat))
+          if (texture instanceof THREE.Texture) state.add(texture.uuid, texture.version);
+      }
+      for (const name of ["appearance", "glassClarity", "themeAmount", "subduedIndex"])
+        state.floats(object.userData[name]?.value ?? 0);
+    });
+    if (!state.end()) { this.reusedFrames++; return; }
+    this.renderedFrames++;
     if (this.quality.antialias === "smaa") this.pipeline.composer.render();
     else this.renderer.render(this.scene, this.camera);
     this.root.dataset.stats = JSON.stringify({
       ready: Boolean(this.source),
+      renderedFrames: this.renderedFrames,
+      reusedFrames: this.reusedFrames,
       clarity: this.clarity.value,
       targetClarity: this.targetClarity,
       spread: this.spread.value,

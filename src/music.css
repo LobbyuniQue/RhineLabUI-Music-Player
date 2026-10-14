@@ -64,6 +64,30 @@
   text-overflow: ellipsis;
 }
 
+.music-playlists {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--theme-line, #b4b0a5);
+}
+.music-playlists label { display: grid; gap: 4px; flex: 1 1 150px; font-size: 11px; }
+.music-playlists input,
+.music-playlists select {
+  min-width: 0;
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--theme-line, #b4b0a5);
+  background: var(--theme-field, #e7e3d9);
+  color: var(--theme-ink, #20221d);
+  font: inherit;
+}
+#music-playlist-limit { flex-basis: 100%; padding: 8px; border: 1px solid var(--theme-accent, #987547); font-size: 12px; }
+#music-playlist-limit p { margin: 0 0 8px; }
+#music-playlist-limit small { display: block; margin-top: 8px; }
+.music-playlists [hidden] { display: none; }
+
 .music-status > span {
   display: block;
   overflow: hidden;

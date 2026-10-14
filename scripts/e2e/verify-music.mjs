@@ -24,7 +24,8 @@ import {
   FIXTURE_ARTIST,
 } from "../lib/music-fixtures.mjs";
 import { stopProcessTree } from "../lib/owned-process.mjs";
-import { CdpTimeoutError, waitForArchiveReturn } from "../lib/archive-return.mjs";
+import { waitForArchiveReturn } from "../lib/archive-return.mjs";
+import { Cdp } from "../lib/cdp.mjs";
 import { observeAnimationFrame } from "../lib/observe-animation-frame.mjs";
 
 const DIST = DIST_DIR;
@@ -36,65 +37,6 @@ const EDGE = BROWSER;
 const PROFILE = profilePath("music");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-class Cdp {
-  constructor(socket) {
-    this.socket = socket;
-    this.id = 0;
-    this.pending = new Map();
-    this.logs = [];
-    socket.addEventListener("message", (event) => {
-      const message = JSON.parse(event.data);
-      if (message.method === "Runtime.consoleAPICalled") {
-        const text = (message.params.args ?? [])
-          .map((arg) => arg.value ?? arg.description ?? arg.type)
-          .join(" ");
-        this.logs.push(`${message.params.type}: ${text}`.slice(0, 300));
-      }
-      if (message.method === "Runtime.exceptionThrown") {
-        this.logs.push(
-          `exception: ${message.params.exceptionDetails?.exception?.description?.slice(0, 300)}`,
-        );
-      }
-      if (message.id && this.pending.has(message.id)) {
-        const { resolve, reject, timer } = this.pending.get(message.id);
-        clearTimeout(timer);
-        this.pending.delete(message.id);
-        message.error
-          ? reject(new Error(JSON.stringify(message.error)))
-          : resolve(message.result);
-      }
-    });
-  }
-  send(method, params = {}, timeoutMs = 90000) {
-    const id = ++this.id;
-    return new Promise((resolve, reject) => {
-      const pending = { resolve, reject, timer: null };
-      this.pending.set(id, pending);
-      this.socket.send(JSON.stringify({ id, method, params }));
-      pending.timer = setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(new CdpTimeoutError(method));
-        }
-      }, timeoutMs);
-    });
-  }
-  async evaluate(expression, awaitPromise = true, timeoutMs = 90000) {
-    const result = await this.send(
-      "Runtime.evaluate",
-      { expression, awaitPromise, returnByValue: true, userGesture: true },
-      timeoutMs,
-    );
-    if (result.exceptionDetails) {
-      throw new Error(
-        result.exceptionDetails.exception?.description ??
-          JSON.stringify(result.exceptionDetails),
-      );
-    }
-    return result.result.value;
-  }
-}
 
 async function waitForJson(url, timeoutMs = 25000) {
   const started = Date.now();
@@ -1045,6 +987,43 @@ try {
     dark.dark === "true" && dark.rows >= 2 && dark.playing >= 1,
     JSON.stringify(dark),
   );
+
+  const limitChoice = await cdp.evaluate(`(async () => {
+    const before = window.rhine.music.library.tracks.length;
+    const wav = new Uint8Array(48);
+    const view = new DataView(wav.buffer);
+    for (const [offset,text] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']]) for (let i=0;i<text.length;i++) wav[offset+i]=text.charCodeAt(i);
+    view.setUint32(4,40,true); view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true);
+    view.setUint32(24,8000,true); view.setUint32(28,16000,true); view.setUint16(32,2,true); view.setUint16(34,16,true); view.setUint32(40,4,true);
+    window.__playlistFiles = Array.from({length:1001},(_,i)=>new File([wav], String(i).padStart(4,'0')+'.wav'));
+    await window.rhine.music.useFiles(window.__playlistFiles);
+    return {before,after:window.rhine.music.library.tracks.length,auto:!!document.querySelector('[data-music="playlist-split"]'),manual:!!document.querySelector('[data-music="playlist-manual"]')};
+  })()`, true, 180000);
+  check("1001 首超限先询问且保留原歌单", limitChoice.before === limitChoice.after && limitChoice.auto && limitChoice.manual, JSON.stringify(limitChoice));
+  const manualChoice = await cdp.evaluate(`(() => {
+    document.querySelector('[data-music="playlist-manual"]').click();
+    return {count:window.rhine.music.library.tracks.length,hidden:document.querySelector('#music-playlist-limit').hidden};
+  })()`, false);
+  check("自行整理分支不加载超限文件夹", manualChoice.count === limitChoice.before && manualChoice.hidden, JSON.stringify(manualChoice));
+  await cdp.evaluate(`(async () => { await window.rhine.music.rescan(); document.querySelector('[data-music="playlist-split"]').click(); })()`, true, 180000);
+  let splitState;
+  for (let i=0;i<30;i++) {
+    await sleep(500);
+    splitState = await cdp.evaluate(`({count:window.rhine.music.library.tracks.length,options:document.querySelector('#music-playlist').options.length,busy:window.rhine.music.panel.switching})`, false, 20000);
+    if (splitState.count === 1000 && splitState.options === 3 && !splitState.busy) break;
+  }
+  check("自动拆分只加载首卷 1000 首并建立两卷", splitState.count === 1000 && splitState.options === 3 && !splitState.busy, JSON.stringify(splitState));
+  await cdp.evaluate(`(() => { const select=document.querySelector('#music-playlist'); select.value=select.options[2].value; select.dispatchEvent(new Event('change',{bubbles:true})); })()`, false);
+  let volumeState;
+  for (let i=0;i<20;i++) {
+    await sleep(500);
+    volumeState = await cdp.evaluate(`({count:window.rhine.music.library.tracks.length,name:window.rhine.music.library.tracks[0]?.name,busy:window.rhine.music.panel.switching})`, false, 20000);
+    if (volumeState.count === 1 && volumeState.name === '1000.wav' && !volumeState.busy) break;
+  }
+  check("歌单下拉切换第二卷且保留第 1001 首", volumeState.count === 1 && volumeState.name === '1000.wav' && !volumeState.busy, JSON.stringify(volumeState));
+  const playlistShot = await cdp.send("Page.captureScreenshot", { format: "png" });
+  await writeFile(join(SHOTS,"music-playlists.png"), Buffer.from(playlistShot.data,"base64"));
+  await cdp.evaluate(`delete window.__playlistFiles`, false);
 
   const finalStats = await cdp.evaluate(`window.rhine.stats()`, false);
   check(

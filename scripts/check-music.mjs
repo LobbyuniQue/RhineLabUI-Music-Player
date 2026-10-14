@@ -153,6 +153,20 @@ assert.equal(flacMeta.codec, 'flac');
 assert.ok(Math.abs(flacMeta.duration - 10) < 0.01, `flac duration 10s expected, got ${flacMeta.duration}`);
 console.log(`flac : "${flacMeta.title}" / ${flacMeta.artist} / ${flacMeta.duration}s`);
 
+// Extended headers have different length conventions in ID3v2.3 and v2.4.
+for (const version of [3, 4]) {
+  const frames = id3Text('TIT2', 'Extended Header Song', 0);
+  const extended = version === 3 ? num(be(6), [0, 0], be(0)) : num(syncsafe(6), [1, 0]);
+  const header = num(chars('ID3'), [version, 0, 0x40], syncsafe(extended.length + frames.length));
+  const meta = await read(num(header, extended, frames), 'fallback.mp3');
+  assert.equal(meta.title, 'Extended Header Song', `ID3v2.${version} must skip the entire extended header`);
+  assert.equal(meta.tagged, true);
+  const tooLong = version === 3 ? be(1000) : syncsafe(1000);
+  const invalid = num(chars('ID3'), [version, 0, 0x40], syncsafe(extended.length + frames.length), tooLong, extended.slice(4), frames);
+  assert.equal((await read(invalid, 'fallback.mp3')).title, 'fallback', 'an out-of-bounds extended header must not expose fake frames');
+}
+console.log('id3  : extended v2.3/v2.4 headers and bounds');
+
 const m4aMeta = await read(mp4Fixture(), 'b.m4a');
 assert.equal(m4aMeta.title, '玻璃与正文');
 assert.equal(m4aMeta.artist, 'Rhine Lab');

@@ -26,6 +26,7 @@ import {
 } from "../lib/music-fixtures.mjs";
 import { stopProcessTree } from "../lib/owned-process.mjs";
 import { CdpTimeoutError, waitForArchiveReturn } from "../lib/archive-return.mjs";
+import { Cdp } from "../lib/cdp.mjs";
 import { installHandoffRenderBudget } from "../lib/handoff-render-budget.mjs";
 import { observeAnimationFrame } from "../lib/observe-animation-frame.mjs";
 
@@ -72,51 +73,6 @@ async function connect(debugPort) {
   throw new Error("no debug target");
 }
 
-class Cdp {
-  constructor(socket) {
-    this.socket = socket;
-    this.id = 0;
-    this.pending = new Map();
-    socket.addEventListener("message", (event) => {
-      const message = JSON.parse(event.data);
-      if (message.id && this.pending.has(message.id)) {
-        const { resolve, reject, timer } = this.pending.get(message.id);
-        clearTimeout(timer);
-        this.pending.delete(message.id);
-        message.error
-          ? reject(new Error(JSON.stringify(message.error)))
-          : resolve(message.result);
-      }
-    });
-  }
-  send(method, params = {}, timeoutMs = 60000) {
-    const id = ++this.id;
-    return new Promise((resolve, reject) => {
-      const pending = { resolve, reject, timer: null };
-      this.pending.set(id, pending);
-      this.socket.send(JSON.stringify({ id, method, params }));
-      pending.timer = setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(new CdpTimeoutError(method));
-        }
-      }, timeoutMs);
-    });
-  }
-  async evaluate(expression, awaitPromise = true, timeoutMs = 60000) {
-    const result = await this.send(
-      "Runtime.evaluate",
-      { expression, awaitPromise, returnByValue: true, userGesture: true },
-      timeoutMs,
-    );
-    if (result.exceptionDetails)
-      throw new Error(
-        result.exceptionDetails.exception?.description ?? "evaluate failed",
-      );
-    return result.result.value;
-  }
-}
-
 await mkdir(SHOTS, { recursive: true });
 // Same reason as verify-music.mjs: a stale profile can serve an older build.
 await resetLocalDirectory(PROFILE);
@@ -135,6 +91,7 @@ function startBridge() {
       "--token",
       TOKEN,
       ...(process.env.RHINE_VLC_AOUT ? ["--aout", process.env.RHINE_VLC_AOUT] : []),
+      "--no-save-playlist",
     ],
     { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
   );
@@ -195,7 +152,7 @@ try {
     socket.addEventListener("open", resolve);
     socket.addEventListener("error", reject);
   });
-  cdp = new Cdp(socket);
+  cdp = new Cdp(socket, { timeoutMs: 60000, recordConsole: false, evaluateFallback: "evaluate failed" });
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");
 
@@ -986,6 +943,27 @@ try {
   const catalogueObservation = {elapsedMs:Date.now()-catalogueStarted,state:restoredCatalogue};
   check("切回 VLC 后自动连接并恢复真实桥接曲库",Date.now() < catalogueDeadline &&
     catalogueRestored(restoredCatalogue),JSON.stringify(catalogueObservation));
+
+  const playlistPreset = await cdp.evaluate(`(async () => {
+    const m=window.rhine.music;
+    m.open();
+    document.querySelector('#music-playlist-name').value='Integration playlist';
+    document.querySelector('#music-playlist-path').value=${JSON.stringify(MUSIC_ROOT)};
+    await m.panel.runAction('playlist-add');
+    return {count:m.library.tracks.length,root:m.bridge().health?.root,
+      options:[...document.querySelector('#music-playlist').options].map(o=>o.textContent),
+      selected:document.querySelector('#music-playlist').value,state:m.bridge().status?.state};
+  })()`,true,180000);
+  check("真实 VLC 歌单文件夹预设与停止旧输出",playlistPreset.count===expectedBridgeIds.length &&
+    playlistPreset.root===MUSIC_ROOT && playlistPreset.selected &&
+    playlistPreset.options.includes('Integration playlist') && playlistPreset.state==='stopped',JSON.stringify(playlistPreset));
+  const playlistRemoved = await cdp.evaluate(`(async () => {
+    const m=window.rhine.music;
+    const id=document.querySelector('#music-playlist').value;
+    await m.panel.runAction('playlist-remove');
+    return {count:m.library.tracks.length,presets:(await m.library.playlists()).filter(p=>p.id===id).length};
+  })()`,true,30000);
+  check("删除 VLC 歌单预设保留真实曲库",playlistRemoved.count===expectedBridgeIds.length && playlistRemoved.presets===0,JSON.stringify(playlistRemoved));
 
   const failed = results.filter((r) => !r.ok);
   console.log(

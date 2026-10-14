@@ -5,7 +5,8 @@
 // (size, mtime), and metadata parsing only touches the head/tail of a file.
 
 import { MusicSearchIndex, type SearchField, type SearchableTrack } from "./music-search";
-import { MusicStore, type StoredTrack } from "./music-store";
+import { MusicStore, type StoredTrack, type StoredRoot, type MusicPlaylist } from "./music-store";
+export type { MusicPlaylist, StoredRoot } from "./music-store";
 import {
   asDirHandle,
   directorySource,
@@ -14,6 +15,7 @@ import {
   pickDirectory,
   type DirHandle,
   type MusicSource,
+  type MusicFileEntry,
 } from "./music-source";
 import { isAudioFile, readTrackMeta, type TrackMeta } from "./music-metadata";
 import type { BridgeTrack } from "./music-bridge";
@@ -46,6 +48,9 @@ export type ScanProgress = {
 };
 
 export type ScanReport = ScanProgress & {
+  totalFiles: number;
+  part: number;
+  parts: number;
   added: number;
   updated: number;
   removed: number;
@@ -54,6 +59,15 @@ export type ScanReport = ScanProgress & {
 };
 
 const BATCH = 40;
+export const PLAYLIST_TRACK_LIMIT = 1000;
+export class PlaylistLimitError extends Error {
+  readonly parts: number;
+  constructor(readonly total: number) {
+    super(`目录有 ${total} 首歌曲，每个歌单最多 ${PLAYLIST_TRACK_LIMIT} 首，请选择自动分卷或自行整理`);
+    this.name = "PlaylistLimitError";
+    this.parts = Math.ceil(total / PLAYLIST_TRACK_LIMIT);
+  }
+}
 const COVER_MAX = 256;
 export const COVER_URL_LIMIT = 384;
 const COVER_URL_GRACE_MS = 1000;
@@ -69,7 +83,7 @@ function breathe(): Promise<void> {
   });
 }
 
-/** Downscales cover art so a 10k library does not store gigabytes of JPEG. */
+/** Keep current-playlist cover storage bounded. */
 async function thumbnail(blob: Blob): Promise<Blob | null> {
   try {
     if (blob.size <= 96 * 1024) return blob;
@@ -157,8 +171,30 @@ export class MusicLibrary {
   private operation = new AbortController();
   private scanGeneration: number | null = null;
   private reuseSource = true;
+  private root: StoredRoot | null = null;
+  private part = 0;
+  private parts = 1;
+  private totalFiles = 0;
+  private split = false;
+  private pending: { source: MusicSource; root: StoredRoot | null; part: number; split: boolean } | null = null;
 
   constructor(private readonly coverUrlLimit = COVER_URL_LIMIT) {}
+
+  get hasSource() { return Boolean(this.pending || this.source); }
+  get canScan() { return this.hasSource; }
+  get currentRoot() { return this.root; }
+  playlistSource() {
+    if (!this.source) return null;
+    return { name: this.root?.name ?? this.label, handle: this.root?.handle, part: this.part,
+      parts: this.parts, total: this.totalFiles, persistent: this.persistent };
+  }
+  playlists() { return this.store.playlists(); }
+  async savePlaylists(list: readonly MusicPlaylist[], activeId?: string) {
+    const root = this.root;
+    await this.store.putPlaylists(list, activeId, { signal: this.operation.signal });
+    if (list.some(item => item.id === activeId && item.kind === "browser") && root && this.root === root)
+      this.root = { ...root, playlistId: activeId };
+  }
 
   private beginOperation() {
     this.operation.abort();
@@ -173,15 +209,26 @@ export class MusicLibrary {
 
   async restore(): Promise<boolean> {
     const generation = this.beginOperation();
+    this.pending = null;
     await this.store.open();
     const saved = await this.store.allTracks();
     const root = await this.store.root();
     if (!this.currentOperation(generation)) return false;
+    const handle = asDirHandle(root?.handle);
+    if (saved.length > PLAYLIST_TRACK_LIMIT) {
+      if (handle) this.pending = { source: directorySource(handle, root?.name ?? handle.name), root,
+        part: 0, split: false };
+      throw new PlaylistLimitError(saved.length);
+    }
     this.releaseCovers();
     this.stored = new Map(saved.map((track) => [track.id, track]));
     this.tracks = saved.map(toLibraryTrack);
     this.refreshIndex();
-    const handle = asDirHandle(root?.handle);
+    this.root = root;
+    this.part = root?.part ?? 0;
+    this.parts = root?.parts ?? 1;
+    this.totalFiles = root?.total ?? saved.length;
+    this.split = root?.split ?? false;
     if (handle) {
       this.source = directorySource(handle, root?.name ?? handle.name);
       this.label = this.source.label;
@@ -201,13 +248,12 @@ export class MusicLibrary {
 
   /** Re-opens the remembered directory inside a user gesture. */
   async reconnect(): Promise<boolean> {
-    const generation = this.beginOperation();
-    const root = await this.store.root();
-    if (!this.currentOperation(generation)) return false;
+    const generation = this.operationGeneration, root = this.root;
+    if (this.pending || this.scanning) return false;
     const handle = asDirHandle(root?.handle);
     if (!handle) return false;
     if (!(await ensurePermission(handle, true))) return false;
-    if (!this.currentOperation(generation)) return false;
+    if (!this.currentOperation(generation) || root !== this.root || this.pending || this.scanning) return false;
     this.source = directorySource(handle, root?.name ?? handle.name);
     this.label = this.source.label;
     this.persistent = true;
@@ -216,33 +262,32 @@ export class MusicLibrary {
 
   async pick(): Promise<boolean> {
     const generation = this.beginOperation();
-    const signal = this.operation.signal;
     const handle: DirHandle = await pickDirectory();
     if (!this.currentOperation(generation)) return false;
     const granted = await ensurePermission(handle, true);
     if (!this.currentOperation(generation)) return false;
     if (!granted) throw new Error("permission");
-    try {
-      await this.store.putRoot({ name: handle.name, handle, savedAt: Date.now() }, signal);
-    } catch (error) {
-      if (!this.currentOperation(generation)) return false;
-      throw error;
-    }
-    if (!this.currentOperation(generation)) return false;
-    this.source = directorySource(handle);
-    this.label = handle.name;
-    this.persistent = true;
-    this.reuseSource = false;
+    this.pending = { source: directorySource(handle),
+      root: { name: handle.name, handle, savedAt: Date.now() }, part: 0, split: false };
+    return true;
+  }
+
+  async usePlaylist(playlist: MusicPlaylist): Promise<boolean> {
+    if (playlist.kind !== "browser") return false;
+    const handle = asDirHandle(playlist.handle);
+    if (!handle || !Number.isSafeInteger(playlist.part) || playlist.part < 0) return false;
+    const generation = this.beginOperation();
+    if (!(await ensurePermission(handle, true)) || !this.currentOperation(generation)) return false;
+    this.pending = { source: directorySource(handle), root: { name: handle.name, handle,
+      savedAt: Date.now(), playlistId: playlist.id }, part: playlist.part,
+      split: playlist.part > 0 || (playlist.total ?? 0) > PLAYLIST_TRACK_LIMIT };
     return true;
   }
 
   /** Fallback path for browsers without the File System Access API. */
   useFiles(files: FileList | File[]) {
     this.beginOperation();
-    this.source = fileListSource(files, "本次选择（不保存）");
-    this.label = this.source.label;
-    this.persistent = false;
-    this.reuseSource = false;
+    this.pending = { source: fileListSource(files, "本次选择（不保存）"), root: null, part: 0, split: false };
   }
 
   /**
@@ -250,7 +295,10 @@ export class MusicLibrary {
    * files, the tags and playback, so the page only searches and displays it.
    */
   useBridgeTracks(tracks: readonly BridgeTrack[], root: string) {
+    if (tracks.length > PLAYLIST_TRACK_LIMIT) throw new PlaylistLimitError(tracks.length);
     this.beginOperation();
+    this.pending = null;
+    this.root = null;
     this.releaseCovers();
     this.source = null;
     this.persistent = true;
@@ -363,6 +411,7 @@ export class MusicLibrary {
   }
 
   async coverUrl(track: LibraryTrack): Promise<string | null> {
+    if (!this.tracks.includes(track)) return null;
     const cached = this.coverUrls.get(track.id);
     if (cached) {
       this.coverUrls.delete(track.id);
@@ -410,7 +459,7 @@ export class MusicLibrary {
   }
 
   async file(track: LibraryTrack): Promise<File | null> {
-    if (!this.source) return null;
+    if (!this.source || !this.tracks.includes(track)) return null;
     const source = this.source, generation = this.operationGeneration;
     const file = await source.resolve(track.path);
     if (source !== this.source || generation !== this.operationGeneration) return null;
@@ -427,6 +476,7 @@ export class MusicLibrary {
 
   async clear(): Promise<void> {
     const generation = this.beginOperation(), signal = this.operation.signal;
+    this.pending = null;
     this.stored.clear();
     this.tracks = [];
     this.refreshIndex();
@@ -457,14 +507,13 @@ export class MusicLibrary {
    * successfully published catalogue. A later scan can start immediately. */
   cancelScan() {
     if (!this.scanning) return;
-    this.operation.abort();
-    this.scanning = false;
-    this.scanGeneration = null;
+    this.beginOperation();
   }
 
   /** Engine/source handoffs also invalidate a pending picker or restore. */
   cancelPending() {
     this.beginOperation();
+    this.pending = null;
   }
 
   /**
@@ -473,11 +522,14 @@ export class MusicLibrary {
    */
   async scan(
     onProgress: (progress: ScanProgress) => void,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; part?: number; split?: boolean } = {},
   ): Promise<ScanReport> {
     const started = Date.now();
     const report: ScanReport = {
       phase: "walking",
+      totalFiles: 0,
+      part: 0,
+      parts: 1,
       seen: 0,
       parsed: 0,
       reused: 0,
@@ -489,7 +541,12 @@ export class MusicLibrary {
       failed: 0,
       ms: 0,
     };
-    if (!this.source || this.scanning) return report;
+    if (!this.hasSource || this.scanning) return report;
+    const selection = this.pending;
+    const source = selection?.source ?? this.source!;
+    const requestedPart = options.part ?? selection?.part ?? this.part;
+    const split = options.split ?? selection?.split ?? this.split;
+    if (!Number.isSafeInteger(requestedPart) || requestedPart < 0) throw new Error("歌单分卷编号无效");
     const generation = this.beginOperation();
     const controller = this.operation;
     const cancel = () => controller.abort();
@@ -497,18 +554,18 @@ export class MusicLibrary {
     if (options.signal?.aborted) controller.abort();
     this.scanning = true;
     this.scanGeneration = generation;
-    const source = this.source;
     const previous = new Map(this.stored);
-    const reuseSource = this.reuseSource;
+    const reuseSource = this.reuseSource && !selection && requestedPart === this.part;
     const next = new Map<string, StoredTrack>();
     const check = () => {
-      if (controller.signal.aborted || !this.currentOperation(generation) || this.source !== source)
+      if (controller.signal.aborted || !this.currentOperation(generation) ||
+        (selection ? this.pending !== selection : this.source !== source))
         throw new DOMException("Scan cancelled", "AbortError");
     };
     const publishProgress = () => {
       if (generation === this.operationGeneration) onProgress({ ...report });
     };
-    const seen = new Set<string>();
+    const entries: MusicFileEntry[] = [];
     const stale: {
       id: string;
       path: string;
@@ -525,13 +582,38 @@ export class MusicLibrary {
       for await (const entry of source.entries()) {
         check();
         report.seen++;
-        report.bytes += entry.size;
         if (!isAudioFile(entry.name)) continue;
-        seen.add(entry.path);
-        report.total++;
+        entries.push(entry);
+        report.totalFiles++;
+        if (report.seen % 200 === 0) {
+          publishProgress();
+          await breathe();
+          check();
+        }
+      }
+      check();
+      report.parts = Math.max(1, Math.ceil(report.totalFiles / PLAYLIST_TRACK_LIMIT));
+      report.part = requestedPart;
+      if (report.totalFiles > PLAYLIST_TRACK_LIMIT && !split) throw new PlaylistLimitError(report.totalFiles);
+      if (requestedPart >= report.parts) throw new Error("该歌单分卷已不存在，请重新选择");
+      entries.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+      const selectedEntries = entries.slice(requestedPart * PLAYLIST_TRACK_LIMIT, (requestedPart + 1) * PLAYLIST_TRACK_LIMIT);
+      report.total = selectedEntries.length;
+      for (const entry of selectedEntries) {
+        check();
         const saved = previous.get(entry.path);
+        let file: File;
+        try { file = await entry.load(); }
+        catch {
+          check();
+          if (reuseSource && saved) next.set(saved.id, saved);
+          report.failed++;
+          continue;
+        }
+        check();
+        report.bytes += file.size;
         const unchanged =
-          reuseSource && saved && saved.size === entry.size && saved.modified === entry.modified && !saved.missing;
+          reuseSource && saved && saved.size === file.size && saved.modified === file.lastModified && !saved.missing;
         if (unchanged) {
           report.reused++;
           next.set(saved.id, saved);
@@ -540,15 +622,10 @@ export class MusicLibrary {
             id: entry.path,
             path: entry.path,
             name: entry.name,
-            size: entry.size,
-            modified: entry.modified,
-            load: entry.load,
+            size: file.size,
+            modified: file.lastModified,
+            load: async () => file,
           });
-        }
-        if (report.seen % 200 === 0) {
-          publishProgress();
-          await breathe();
-          check();
         }
       }
 
@@ -594,17 +671,30 @@ export class MusicLibrary {
 
       // Files that disappeared from the source are dropped from the index.
       check();
+      if (report.total > 0 && !next.size && report.failed > 0) throw new Error("此歌单的歌曲均无法读取");
       report.removed = [...previous.keys()].filter(id => !next.has(id)).length;
 
       report.phase = "saving";
       publishProgress();
       check();
-      await this.store.commitScan([...next.values()], covers, { signal: controller.signal });
+      const selectedRoot = selection ? selection.root : this.root;
+      const root = selectedRoot ? { ...selectedRoot, part: requestedPart, parts: report.parts,
+        total: report.totalFiles, split } : null;
+      await this.store.commitScan([...next.values()], covers, { signal: controller.signal, root });
       check();
 
       // Rebuild the in-memory view from the store so reused and parsed entries
       // share one code path.
       this.releaseCovers();
+      this.source = source;
+      this.label = source.label;
+      this.persistent = source.persistent;
+      this.root = root;
+      this.part = requestedPart;
+      this.parts = report.parts;
+      this.totalFiles = report.totalFiles;
+      this.split = split;
+      if (this.pending === selection) this.pending = null;
       this.stored = next;
       this.tracks = [...next.values()].map(toLibraryTrack);
       this.reuseSource = true;
@@ -613,8 +703,10 @@ export class MusicLibrary {
       report.ms = Date.now() - started;
       publishProgress();
       return report;
-    } catch {
-      report.phase = controller.signal.aborted || !this.currentOperation(generation) || this.source !== source
+    } catch (error) {
+      if (error instanceof PlaylistLimitError) throw error;
+      report.phase = controller.signal.aborted || !this.currentOperation(generation) ||
+        (selection ? this.pending !== selection : this.source !== source)
         ? "cancelled" : "error";
       report.ms = Date.now() - started;
       publishProgress();

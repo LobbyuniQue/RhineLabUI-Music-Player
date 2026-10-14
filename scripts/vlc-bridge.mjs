@@ -10,7 +10,8 @@
 //     reaction already consumes, and pushes to the page over SSE.
 //
 // Security: binds 127.0.0.1 only and requires a per-run token; it never accepts
-// a path from the page — the page can only reference ids from the scanned root.
+// playback accepts only scanned ids; authenticated playlist changes accept a
+// directory and publish it only after validation and indexing succeed.
 //
 // Usage:
 //   node --experimental-strip-types scripts/vlc-bridge.mjs --root "D:\Music"
@@ -22,13 +23,14 @@
 import { createServer } from "node:http";
 import { createServer as createProbe } from "node:net";
 import { spawn } from "node:child_process";
-import { open, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import { statSync, readFileSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readTrackMeta, isAudioFile } from "../src/music-metadata.ts";
 import { VlcOperationQueue, VlcStatusReader, waitWithSignal } from "./lib/vlc-status.mjs";
+import { NativePlaylistLibrary, PlaylistError, readPlaylistRequest, loadPlaylistSelection, savePlaylistSelection } from "./lib/native-playlists.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT = resolve(HERE, "..");
@@ -78,6 +80,8 @@ async function freePort(preferred, excluded = new Set()) {
 const TOKEN = args.token ?? randomUUID().replace(/-/g, "").slice(0, 24);
 const MUSIC_ROOT = args.root ? resolve(args.root) : null;
 const CACHE_FILE = join(PROJECT, ".tools", "cache", `music-index-${PORT}.json`);
+const ROOT_FILE = join(PROJECT, ".tools", "music-root.txt");
+const PLAYLIST_FILE = join(PROJECT, ".tools", "music-playlist.json");
 const ASCII = /^[\x20-\x7e]*$/;
 
 function findVlc() {
@@ -123,15 +127,15 @@ if (!ASCII.test(VLC)) {
 }
 
 // ------------------------------------------------------------------ library
-let library = [];
-let scanState = { phase: "idle", seen: 0, added: 0, reused: 0, failed: 0, ms: 0 };
-/** False until VLC answered and the first scan finished. */
+/** False until VLC answered and the first directory check finished. */
 let ready = false;
-
-const idOf = (path) => createHash("sha1").update(path).digest("hex").slice(0, 16);
-
-// Embedded art lives beside the metadata cache, one file per track id.
-const COVER_DIR = join(dirname(CACHE_FILE), "covers");
+let playlistChanges = 0;
+const nativeLibrary = new NativePlaylistLibrary({
+  root: MUSIC_ROOT, cacheFile: CACHE_FILE, isAudioFile,
+  readMeta: async (path, info) => readTrackMeta(await readBlobLike(path, info.size), basename(path)),
+  beforeCommit: stopForPlaylist,
+});
+const scan = (options) => nativeLibrary.scan(options);
 
 async function readBlobLike(path, size) {
   // The metadata reader only needs a handful of small ranges, so each slice
@@ -153,104 +157,6 @@ async function readBlobLike(path, size) {
       },
     }),
   };
-}
-
-async function walk(root) {
-  const found = [];
-  const queue = [{ dir: root, depth: 0 }];
-  while (queue.length) {
-    const { dir, depth } = queue.shift();
-    if (depth > 8) continue;
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.name.startsWith(".")) continue;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        queue.push({ dir: full, depth: depth + 1 });
-        continue;
-      }
-      if (entry.isFile() && isAudioFile(entry.name)) found.push(full);
-    }
-  }
-  return found;
-}
-
-async function loadCache() {
-  try {
-    const parsed = JSON.parse(await readFile(CACHE_FILE, "utf8"));
-    return new Map((parsed.tracks ?? []).map((track) => [track.path, track]));
-  } catch {
-    return new Map();
-  }
-}
-
-async function saveCache() {
-  await mkdir(dirname(CACHE_FILE), { recursive: true });
-  await writeFile(CACHE_FILE, JSON.stringify({ root: MUSIC_ROOT, tracks: library }, null, 1), "utf8");
-}
-
-async function scan({ rescan = false } = {}) {
-  const started = Date.now();
-  scanState = { phase: "walking", seen: 0, added: 0, reused: 0, failed: 0, ms: 0 };
-  const cached = rescan ? new Map() : await loadCache();
-  const files = await walk(MUSIC_ROOT);
-  const tracks = [];
-  for (const path of files) {
-    scanState.seen++;
-    try {
-      const info = await stat(path);
-      const previous = cached.get(path);
-      if (previous && previous.size === info.size && previous.mtime === info.mtimeMs) {
-        tracks.push(previous);
-        scanState.reused++;
-        continue;
-      }
-      scanState.phase = "reading";
-      const meta = await readTrackMeta(await readBlobLike(path, info.size), basename(path));
-      // Cover art stays on disk next to the metadata cache; the cache entry only
-      // records the mime so reused tracks keep reporting it without re-parsing.
-      let cover = null;
-      if (meta.picture?.data?.length) {
-        try {
-          await mkdir(COVER_DIR, { recursive: true });
-          await writeFile(join(COVER_DIR, idOf(path)), Buffer.from(meta.picture.data));
-          cover = meta.picture.mime || "image/jpeg";
-        } catch { /* cover is best-effort */ }
-      } else {
-        try { await stat(join(COVER_DIR, idOf(path))); cover = "image/jpeg"; } catch { /* no art */ }
-      }
-      tracks.push({
-        id: idOf(path),
-        path,
-        name: basename(path),
-        size: info.size,
-        mtime: info.mtimeMs,
-        title: meta.title,
-        artist: meta.artist,
-        album: meta.album,
-        track: meta.track,
-        disc: meta.disc ?? null,
-        year: meta.year ?? "",
-        genre: meta.genre ?? "",
-        duration: meta.duration,
-        codec: meta.codec,
-        cover,
-      });
-      scanState.added++;
-    } catch {
-      scanState.failed++;
-    }
-  }
-  library = tracks.sort((a, b) => a.path.localeCompare(b.path, "zh-Hans-CN"));
-  scanState.phase = "done";
-  scanState.ms = Date.now() - started;
-  await saveCache().catch(() => {});
-  return scanState;
 }
 
 // ---------------------------------------------------------------- VLC control
@@ -429,8 +335,23 @@ function serialTransport(url, operation) {
   return controlQueue.run(() => { assertTransport(revision); return operation(revision); });
 }
 
+async function stopForPlaylist(next) {
+  if (next.root === nativeLibrary.root && next.part === nativeLibrary.playlist.part &&
+      !nativeLibrary.playlist.needsSplit && (!current.id || next.tracks.some((track) => track.id === current.id))) return;
+  const revision = ++transportRevision;
+  prepared = null;
+  await controlQueue.run(async () => {
+    assertTransport(revision);
+    transportIntent = "stopped";
+    hasStarted = false;
+    await controlledCall("?command=pl_stop", revision);
+    current = { id: null, startedAt: 0 };
+    await restoreVolume(revision);
+  });
+}
+
 async function prepareTrack(id, revision, position = 0) {
-  const track = library.find((entry) => entry.id === id);
+  const track = nativeLibrary.tracks.find((entry) => entry.id === id);
   if (!track) throw new Error("unknown id");
   prepared = null;
   transportIntent = "preparing";
@@ -500,7 +421,7 @@ function mapStatus(raw) {
     title: meta.title ?? "",
     artist: meta.artist ?? "",
     album: meta.album ?? "",
-    codec: library.find((entry) => entry.id === current.id)?.codec ?? "",
+    codec: nativeLibrary.tracks.find((entry) => entry.id === current.id)?.codec ?? "",
     vlc: { version: vlcInfo.version, pid: vlc?.pid ?? null, startedAt: vlcInfo.startedAt, cachedAt: statusReader.cachedAt },
   };
 }
@@ -669,6 +590,19 @@ function authorized(req, url) {
   return url.searchParams.get("token") === TOKEN;
 }
 
+function publicLibrary() {
+  return {
+    ...nativeLibrary.playlist,
+    playlist: nativeLibrary.playlist,
+    scan: nativeLibrary.scanState,
+    tracks: nativeLibrary.tracks.map(({ id, name, title, artist, album, track, disc, year, genre, duration, codec, size, path, cover }) => ({
+      id, name, title, artist, album, track, disc: disc ?? null, year: year ?? "", genre: genre ?? "",
+      duration, codec, size, hasCover: Boolean(cover),
+      folder: relative(nativeLibrary.root, dirname(path)).split(sep).join("/"),
+    })),
+  };
+}
+
 async function handle(req, res) {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
   if (req.method === "OPTIONS") {
@@ -680,43 +614,45 @@ async function handle(req, res) {
     return json(res, 200, {
       ok: true,
       ready,
-      root: MUSIC_ROOT,
-      tracks: library.length,
-      scan: scanState,
+      root: nativeLibrary.root,
+      tracks: nativeLibrary.tracks.length,
+      scan: nativeLibrary.scanState,
+      playlist: nativeLibrary.playlist,
       vlc: status_.vlc,
     });
   }
   if (!authorized(req, url)) return json(res, 401, { error: "unauthorized" });
 
+  if (url.pathname === "/api/playlist") {
+    if (req.method !== "POST") return json(res, 405, { error: "playlist_post_required" });
+    const input = await readPlaylistRequest(req);
+    if (playlistChanges) return json(res, 409, { error: "playlist_switch_in_progress" });
+    // Switching blocks starts, but validation/limit failures preserve the old output.
+    playlistChanges++;
+    try {
+      await scan({ root: input.root, part: input.part ?? 0, split: input.split ?? false });
+      let warning;
+      try {
+        if (!args.flags.has("no-save-playlist")) await savePlaylistSelection(ROOT_FILE, PLAYLIST_FILE, nativeLibrary.playlist);
+      }
+      catch (error) {
+        warning = "playlist_selection_not_saved";
+        console.error(`[bridge] 歌单已切换，但无法保存重启偏好 (${error.code ?? "Error"})`);
+      }
+      return json(res, 200, { ...publicLibrary(), ...(warning ? { warning } : {}) });
+    } finally { playlistChanges--; }
+  }
+
   if (url.pathname === "/api/library") {
-    return json(res, 200, {
-      root: MUSIC_ROOT,
-      scan: scanState,
-      tracks: library.map(({ id, name, title, artist, album, track, disc, year, genre, duration, codec, size, path, cover }) => ({
-        id,
-        name,
-        title,
-        artist,
-        album,
-        track,
-        disc: disc ?? null,
-        year: year ?? "",
-        genre: genre ?? "",
-        duration,
-        codec,
-        size,
-        hasCover: Boolean(cover),
-        folder: relative(MUSIC_ROOT, dirname(path)).split(sep).join("/"),
-      })),
-    });
+    return json(res, 200, publicLibrary());
   }
   if (url.pathname === "/api/cover") {
     const id = url.searchParams.get("id") ?? "";
     // Ids are sha1 hex digests minted by the scan, so this can never escape the
     // cache directory; arbitrary paths are impossible by construction.
     if (!/^[0-9a-f]{16}$/.test(id)) return json(res, 400, { error: "bad id" });
-    const track = library.find((item) => item.id === id);
-    const file = join(COVER_DIR, id);
+    const track = nativeLibrary.tracks.find((item) => item.id === id);
+    const file = join(nativeLibrary.coverDir, id);
     try {
       if (!track?.cover) throw new Error("no cover");
       const data = await readFile(file);
@@ -727,12 +663,15 @@ async function handle(req, res) {
     }
   }
   if (url.pathname === "/api/scan") {
+    if (playlistChanges) return json(res, 409, { error: "playlist_switch_in_progress" });
     const report = await scan({ rescan: url.searchParams.get("full") === "1" });
-    return json(res, 200, { scan: report, tracks: library.length });
+    return json(res, 200, { scan: report, tracks: nativeLibrary.tracks.length, playlist: nativeLibrary.playlist });
   }
   if (["/api/prepare", "/api/start", "/api/play", "/api/resume", "/api/pause", "/api/stop"].includes(url.pathname)) {
+    if (playlistChanges && ["/api/prepare", "/api/start", "/api/play", "/api/resume"].includes(url.pathname))
+      return json(res, 409, { error: "playlist_switch_in_progress" });
     const id = url.searchParams.get("id");
-    if (["/api/prepare", "/api/play"].includes(url.pathname) && !library.some((track) => track.id === id))
+    if (["/api/prepare", "/api/play"].includes(url.pathname) && !nativeLibrary.tracks.some((track) => track.id === id))
       return json(res, 400, { error: "unknown id" });
     // Reject an obsolete/forged ticket before it can invalidate a newer
     // transport operation or stop a track that has already begun playing.
@@ -848,7 +787,11 @@ setInterval(() => {
 }, 40);
 
 const server = createServer((req, res) => {
-  handle(req, res).catch((error) => json(res, 500, { error: String(error.message ?? error) }));
+  handle(req, res).catch((error) => {
+    if (res.destroyed || res.writableEnded) return;
+    json(res, error instanceof PlaylistError ? error.status : 500,
+      { error: String(error.message ?? error), ...(error instanceof PlaylistError ? error.details : {}) });
+  });
 });
 
 server.on("error", (error) => {
@@ -876,9 +819,16 @@ server.listen(PORT, "127.0.0.1", async () => {
     // Keep a cached status so health and the spectrum loop never wait on VLC.
     setInterval(pollStatus, 1000);
     await refreshStatus();
-    const first = await scan();
+    const selection = await loadPlaylistSelection(PLAYLIST_FILE, MUSIC_ROOT);
+    let first;
+    try { first = await scan({ ...selection, allowPending: true }); }
+    catch (error) {
+      if (!(error instanceof PlaylistError) || error.message !== "playlist_part_out_of_range") throw error;
+      console.error("[bridge] 记忆的分卷已不存在，返回第一卷");
+      first = await scan({ part: 0, split: selection.split, allowPending: true });
+    }
     ready = true;
-    console.log(`[bridge] library: ${library.length} tracks (added ${first.added}, reused ${first.reused}, failed ${first.failed}, ${first.ms}ms)`);
+    console.log(`[bridge] library: ${nativeLibrary.tracks.length} tracks (added ${first.added}, reused ${first.reused}, failed ${first.failed}, ${first.ms}ms)`);
     console.log("[bridge] 在网页「设置 → 本地音乐」中填入端口与令牌，或直接打开本地音乐面板。");
   } catch (error) {
     console.error(`[bridge] 初始化失败：${error.message ?? error}`);

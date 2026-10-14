@@ -313,7 +313,7 @@ function panelFixture(f, initialEngine = "browser") {
     next: async () => bridge.play(bridgeQueue[queueIndex(bridgeQueue.length, bridgeQueue.findIndex((item) => item.id === currentId), bridgeMode)].id),
     previous: async () => bridge.play(bridgeQueue[queueIndex(bridgeQueue.length, bridgeQueue.findIndex((item) => item.id === currentId), bridgeMode, -1)].id),
   };
-  const library = { tracks, label: "Fixtures", source: {}, cancelScan() {}, stats: () => ({ count: 3, artists: 1, bytes: 100, missing: 0 }), search: () => library.tracks };
+  const library = { tracks, label: "Fixtures", source: {}, get hasSource() { return Boolean(this.source); }, cancelScan() {}, stats: () => ({ count: 3, artists: 1, bytes: 100, missing: 0 }), search: () => library.tracks };
   panel.attach({ player: f.player, library, bridge, engine: () => engine, canControl: () => controllable, onSound() {}, onNotify: (value) => notices.push(value), onLibraryChanged: () => { ++libraryChanges; } });
   panel.results = tracks; panel.bridgeStatus = status();
   return { panel, bridge, bridgePlays, notices, setEngine(value) { engine = value; }, setControllable(value) { controllable = value; }, get bridgeQueue() { return bridgeQueue; }, get libraryChanges() { return libraryChanges; } };

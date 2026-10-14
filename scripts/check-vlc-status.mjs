@@ -118,7 +118,8 @@ function bridgeHarness(signals = AbortSignal) {
   runInContext(`
     let vlc = {pid: 1}, stopping = false, vlcInfo = {version: "test", startedAt: 1};
     const vlcUrl = (query = "") => "http://127.0.0.1/requests/status.json" + query;
-    const vlcAuth = "test", library = [];
+    const vlcAuth = "test";
+    const nativeLibrary = { root: "fixture", tracks: [], playlist: { part: 0, needsSplit: false } };
     ${source.slice(source.indexOf("let current ="), source.indexOf("// -------------------------------------------------------------- spectrum tap"))}
     globalThis.bridge = {
       status, publicStatus, pollStatus, refreshStatus, vlcCall, serialTransport, controlQueue, statusReader,

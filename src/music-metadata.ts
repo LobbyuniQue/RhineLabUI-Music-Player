@@ -230,7 +230,15 @@ function parseId3v2(bytes: Uint8Array, meta: TrackMeta) {
   const flags = bytes[5];
   const tagSize = syncSafe(bytes, 6);
   const end = Math.min(bytes.length, 10 + tagSize);
-  let offset = 10 + (flags & 0x40 ? 4 : 0); // extended header
+  const total = 10 + tagSize + (major === 4 && flags & 0x10 ? 10 : 0);
+  let offset = 10;
+  if (major >= 3 && flags & 0x40) {
+    if (offset + 4 > end) return { total };
+    // v2.3 excludes its four size bytes; v2.4 includes them.
+    const length = major === 3 ? 4 + u32be(bytes, offset) : syncSafe(bytes, offset);
+    if (length < (major === 3 ? 10 : 6) || offset + length > end) return { total };
+    offset += length;
+  }
 
   if (major === 2) {
     while (offset + 6 <= end) {
@@ -252,7 +260,7 @@ function parseId3v2(bytes: Uint8Array, meta: TrackMeta) {
       offset += 10 + size;
     }
   }
-  return { total: 10 + tagSize + (flags & 0x10 ? 10 : 0) };
+  return { total };
 }
 
 function applyId3Frame(id: string, payload: Uint8Array, meta: TrackMeta, legacyPicture: boolean) {

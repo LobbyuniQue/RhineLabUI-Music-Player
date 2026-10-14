@@ -57,6 +57,7 @@ export function musicSettingsMarkup(library: MusicLibrary, state: MusicSettingsS
       <label>令牌<input type="text" data-music-bridge-token value="${escapeHtml(state.bridgeToken)}" placeholder="桥接启动时打印"/></label>
     </div>
     <div class="music-settings-actions">
+      <button data-music-setting="playlists">管理与切换歌单</button>
       <button data-music-bridge="connect">连接桥接</button>
       <button data-music-bridge="disconnect" ${state.bridgeConnected ? "" : "disabled"}>断开</button>
     </div>

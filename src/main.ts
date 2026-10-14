@@ -387,7 +387,7 @@ async function refreshBridgeStatus() {
 }
 async function loadBridgeLibrary(force = false) {
   const health = musicBridge.info;
-  if (prefs.musicEngine !== "vlc" || !musicBridge.connected || !health) return 0;
+  if (prefs.musicEngine !== "vlc" || !musicBridge.connected || !health || musicPanel.switching) return 0;
   // onConnectionChange and the manual connect action share the same load;
   // a new health object identifies a new stream/session after reconnection.
   if (!force && bridgeLibraryLoad?.health === health) return bridgeLibraryLoad.promise;
@@ -462,7 +462,11 @@ const engineHandoff = new MusicEngineHandoff({
       else await loadBridgeLibrary();
     } else {
       musicBridge.disconnect();
-      await musicLibrary.restore().catch(() => false);
+      await musicLibrary.restore().catch(error => {
+        if (current() && error instanceof Error && error.name === "PlaylistLimitError")
+          musicPanel.promptOversizedLibrary((error as Error & { total: number }).total);
+        return false;
+      });
       if (!current()) return;
       musicPanel.refreshLibrary();
       onLibraryMayHaveChanged();
@@ -501,6 +505,7 @@ const columnMemory: Record<"archive" | "music", number[]> = {
   archive: rhineView.columns.map((_, lane) => rhineView.columnFiles(lane)[0] ?? 0),
   music: [],
 };
+const memoryViews: Record<"archive" | "music", ArchiveView | null> = { archive: rhineView, music: null };
 let musicViewCache: ArchiveView | null = null;
 let musicViewGrouping: MusicGrouping | null = null;
 let musicViewTracks: readonly unknown[] | null = null;
@@ -513,16 +518,32 @@ function musicView(): ArchiveView {
   return musicViewCache;
 }
 function memoryFor(v: ArchiveView) {
-  const mem = columnMemory[v.kind];
-  if (mem.length !== v.columns.length) {
-    columnMemory[v.kind] = v.columns.map((_, lane) => mem[lane] ?? v.columnFiles(lane)[0] ?? 0);
+  const previous = memoryViews[v.kind];
+  if (previous !== v) {
+    const remembered = new Map<string, string>();
+    previous?.columns.forEach((name, lane) => {
+      const index = columnMemory[v.kind][lane];
+      if (previous.records[index]) remembered.set(name, previous.backingId(index));
+    });
+    const byId = new Map(v.records.map((_, index) => [v.backingId(index), index]));
+    columnMemory[v.kind] = v.columns.map((name, lane) => {
+      const id = remembered.get(name), index = id === undefined ? undefined : byId.get(id);
+      return index !== undefined && v.fileLocation(index).lane === lane ? index : v.columnFiles(lane)[0] ?? 0;
+    });
+    memoryViews[v.kind] = v;
   }
   return columnMemory[v.kind];
 }
 let fileTicks: HTMLButtonElement[] = [];
+let fileTicksView: ArchiveView | null = null;
+let fileTicksLane = -1;
 function refreshFileTicks() {
   const v = view();
-  $("#file-ticks").innerHTML = v.columnFiles(v.fileLocation(selected).lane).map((index) => `<button data-select="${index}"></button>`).join("");
+  const lane = v.fileLocation(selected).lane;
+  if (fileTicksView === v && fileTicksLane === lane) return;
+  fileTicksView = v;
+  fileTicksLane = lane;
+  $("#file-ticks").innerHTML = v.columnFiles(lane).map((index) => `<button data-select="${index}"></button>`).join("");
   fileTicks = [...$("#file-ticks").querySelectorAll<HTMLButtonElement>("button")];
 }
 function rowSpacingForView(v: ArchiveView = activeView()) {
@@ -536,6 +557,8 @@ function applyView(v: ArchiveView, preferBackingId?: string) {
     void cancelMusicArchive();
     if (mode === "detail") setMode("archive");
   }
+  const previous = view();
+  const previousGroup = previous.kind === v.kind ? previous.columns[previous.fileLocation(selected).lane] : undefined;
   setActiveView(v);
   applyRowSpacing();
   const mem = memoryFor(v);
@@ -543,9 +566,11 @@ function applyView(v: ArchiveView, preferBackingId?: string) {
   if (preferred >= 0) {
     selected = preferred;
   } else {
-    const lane = Math.min(v.fileLocation(Math.min(selected, v.records.length - 1)).lane, v.columns.length - 1);
+    const rememberedLane = previousGroup === undefined ? -1 : v.columns.indexOf(previousGroup);
+    const lane = rememberedLane >= 0 ? rememberedLane : Math.min(v.fileLocation(Math.min(selected, v.records.length - 1)).lane, v.columns.length - 1);
     selected = mem[lane] ?? v.columnFiles(0)[0] ?? 0;
   }
+  mem[v.fileLocation(selected).lane] = selected;
   filter = "全部档案";
   refreshFileTicks();
   scene?.select(selected);
@@ -728,9 +753,15 @@ const musicHost = {
   engine: () => prefs.musicEngine,
   canControl: () => !engineHandoff.busy,
   beforePlayback: () => cancelMusicArchive(),
+  beforeLibraryChange: async () => {
+    await cancelMusicArchive();
+    musicPlayer.stop();
+    if (mode === "detail" && activeView().kind === "music") setMode("archive");
+  },
   onSound: (sound: Parameters<typeof audio.play>[0], pan?: number) => audio.play(sound, pan),
   onNotify: (message: string) => notify(message),
   onOpenSettings: () => closeModal(() => openModal("settings")),
+  onPlaylistPrompt: () => closeModal(() => openModal("music")),
   onLibraryChanged: () => { refreshMusicSettings(); onLibraryMayHaveChanged(); },
   onVolumeChange: (value: number) => {
     prefs.localMusicVolume = value;
@@ -795,7 +826,7 @@ function syncSystemMedia() {
 }
 
 async function systemMediaAction(action: "play" | "pause" | "stop" | "next" | "previous" | "seek" | "seekTo", value = 0) {
-  if (engineHandoff.busy || (action === "play" && musicReveal.pending)) return;
+  if (engineHandoff.busy || musicPanel.switching || (action === "play" && musicReveal.pending)) return;
   const engine = prefs.musicEngine;
   try {
     await cancelMusicArchive(action !== "next" && action !== "previous");
@@ -852,6 +883,10 @@ function refreshMusicSettings() {
 }
 async function runMusicSetting(action: string) {
   if (engineHandoff.busy) return;
+  if (action === "playlists") {
+    closeModal(() => openModal("music"));
+    return;
+  }
   if (action === "pick") {
     if (prefs.musicEngine === "vlc") {
       notify("VLC 内核下由桥接服务扫描目录，请改用「浏览器内核」或重新指定 --root");
@@ -1107,6 +1142,7 @@ function updateSelection(navigation?: ArchiveNavigation) {
   const r = v.records[selected];
   const { lane } = v.fileLocation(selected);
   const files = v.columnFiles(lane);
+  refreshFileTicks();
   $("#selected-prefix").textContent = r.id.slice(0, 2);
   selectionTitle.update({ text: r.title, animated: motionActive("rollingText") && mode === "archive" });
   clearanceTitle.update({ text: r.clearance, animated: motionActive("rollingText") && mode === "archive" });
@@ -1276,7 +1312,7 @@ function syncMusicArchiveMotion() {
 }
 
 function openFile() {
-  if (!ready || engineHandoff.busy) return;
+  if (!ready || engineHandoff.busy || musicPanel.switching) return;
   const v = activeView();
   const track = v.kind === "music" ? (v as MusicArchiveView).musicTracks[selected] : null;
   const request = track ? prepareMusicArchive(track) : null;
@@ -1408,6 +1444,7 @@ function openModal(kind: NonNullable<typeof modal>) {
   modal = kind;
   searchQuery = "";
   filter = "全部档案";
+  archiveResultScope = "";
   audio.play("page-open");
   renderModal();
 }
@@ -1476,9 +1513,20 @@ function renderModal() {
       if (e.target === e.currentTarget) closeModal();
     });
 }
+const ARCHIVE_RESULT_PAGE_SIZE = 240;
+let archiveVisibleResults = ARCHIVE_RESULT_PAGE_SIZE;
+let archiveResultsView: ArchiveView | null = null;
+let archiveResultScope = "";
 function renderResults() {
   const v = view();
   const isMusic = v.kind === "music";
+  const scope = `${modal}\n${filter}\n${searchQuery}`;
+  if (archiveResultsView !== v || archiveResultScope !== scope) {
+    archiveResultsView = v;
+    archiveResultScope = scope;
+    archiveVisibleResults = ARCHIVE_RESULT_PAGE_SIZE;
+  }
+  const query = searchQuery.toLowerCase();
   const results = v.records
     .map((r, i) => ({ r, i }))
     .filter(
@@ -1487,18 +1535,27 @@ function renderResults() {
         (filter === "全部档案" || r.category === filter) &&
         `${r.id} ${r.title} ${r.en} ${r.department} ${r.lead}`
           .toLowerCase()
-          .includes(searchQuery.toLowerCase()),
+          .includes(query),
     );
   $("#search-results").innerHTML = results.length
-    ? results
+    ? results.slice(0, archiveVisibleResults)
         .map(
           ({ r, i }) =>
             `<button class="result-row" data-result="${i}"><span class="result-name"><b>${r.id}</b><span>${escapeHtml(r.title)}<small>${escapeHtml(r.en)}</small></span>${!isMusic && saved.has(r.id) ? "<i>＋</i>" : ""}</span><span>${escapeHtml(isMusic ? r.en : r.department)}</span><span>${r.clearance === "RESTRICTED" ? "CATALOG ONLY" : "AUTHORIZED"} <i>↗</i></span></button>`,
         )
-        .join("")
+        .join("") + (results.length > archiveVisibleResults
+          ? `<button class="music-more" data-action="more-archive-results">继续显示 ${Math.min(ARCHIVE_RESULT_PAGE_SIZE, results.length - archiveVisibleResults)} 首（共 ${results.length} 首） ↓</button>`
+          : "")
     : `<div class="empty-results"><span>∅</span><strong>${modal === "saved" && !searchQuery ? "尚无收藏档案" : isMusic ? "没有匹配的曲目" : "没有匹配的档案"}</strong><p>${modal === "saved" && !searchQuery ? "读取档案时，选择 SAVE ARCHIVE 将其保存在此处。" : isMusic ? "尝试其他曲名、艺术家或专辑名。" : "尝试其他名称、档案编号，或切换科室分类。"}</p><button data-action="reset-search">${modal === "saved" ? "查看全部档案 →" : "重置检索 →"}</button></div>`;
   $("#result-count").textContent =
-    `${String(results.length).padStart(2, "0")} ${isMusic ? "TRACKS" : "RECORDS"} FOUND`;
+    `${String(results.length).padStart(2, "0")} ${isMusic ? "TRACKS" : "RECORDS"} FOUND${results.length > archiveVisibleResults ? ` · 已显示 ${archiveVisibleResults}` : ""}`;
+}
+function showMoreArchiveResults() {
+  const list = $("#search-results"), scrollTop = list.scrollTop, firstNew = archiveVisibleResults;
+  archiveVisibleResults += ARCHIVE_RESULT_PAGE_SIZE;
+  renderResults();
+  list.scrollTop = scrollTop;
+  list.querySelectorAll<HTMLButtonElement>("[data-result]")[firstNew]?.focus({ preventScroll: true });
 }
 function updateQualitySummary() {
   const summary = document.querySelector("#quality-summary");
@@ -1680,6 +1737,7 @@ document.addEventListener("click", (e) => {
     return;
   }
   const action = el.dataset.action;
+  if (action === "more-archive-results") { showMoreArchiveResults(); return; }
   if (action === "retry-music-access") { openFile(); return; }
   if (action === "toggle-three") { void toggleThree(); return; }
   if (action === "library-mode") {
@@ -2154,7 +2212,11 @@ syncLibraryModeUI();
 // Music archive mode persisted from an earlier session: the library restores
 // lazily, so kick the restore here and swap views once tracks are known.
 if (prefs.libraryMode === "music" && !musicLibrary.tracks.length && prefs.musicEngine === "browser") {
-  void musicLibrary.restore().then((restored) => {
+  void musicLibrary.restore().catch(error => {
+    if (prefs.musicEngine === "browser" && error instanceof Error && error.name === "PlaylistLimitError")
+      musicPanel.promptOversizedLibrary((error as Error & { total: number }).total);
+    return false;
+  }).then((restored) => {
     if (prefs.musicEngine !== "browser" || engineHandoff.busy) return;
     if (restored) onLibraryMayHaveChanged();
     else {
@@ -2213,6 +2275,7 @@ if (isWallpaper) {
   let pausedAt: number | undefined;
   const pause = () => {
     scene?.resetFrameClock();
+    viewer?.resetFrameClock();
     const paused = wallpaperHost()?.paused ?? false;
     if (paused && pausedAt === undefined) pausedAt = performance.now();
     if (!paused && pausedAt !== undefined) {
@@ -2350,6 +2413,7 @@ Object.assign(window, {
       bridgePause: () => musicBridge.pause().catch(() => null),
       bridgeStop: () => musicBridge.stop().catch(() => null),
       useFiles: (files: File[]) => {
+        musicPanel.cancelPending();
         musicLibrary.useFiles(files);
         return musicPanel.startScan();
       },

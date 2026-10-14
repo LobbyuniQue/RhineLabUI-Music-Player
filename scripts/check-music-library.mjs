@@ -57,7 +57,283 @@ const seed = async () => {
   assert.equal((await value.scan(() => {})).phase, "done");
   return value;
 };
+const directory = (name, file, fail = false) => ({
+  kind: "directory", name,
+  async *values() { if (fail) throw new Error("unreadable directory"); yield { kind: "file", name: file.name, getFile: async () => file }; },
+  async getFileHandle() { return { getFile: async () => file }; },
+});
+// Exercise the real IDB transaction branch, including queued writes, atomic
+// rollback and synchronous structured-clone failures; no extra test dependency.
+function indexedDbFixture() {
+  const data = new Map(["tracks", "covers", "meta"].map(name => [name, new Map()]));
+  let failNext = false, beforeComplete = null;
+  return {
+    failNext() { failNext = true; },
+    beforeComplete(callback) { beforeComplete = callback; },
+    transaction(names, mode) {
+      const stores = Array.isArray(names) ? names : [names];
+      const draft = new Map(stores.map(name => [name, new Map(data.get(name))]));
+      const queue = [];
+      let aborted = false;
+      const tx = {
+        error: null, oncomplete: null, onabort: null, onerror: null,
+        abort() {
+          if (aborted) return;
+          aborted = true;
+          tx.error ??= new DOMException("transaction aborted", "AbortError");
+          queueMicrotask(() => tx.onabort?.());
+        },
+        objectStore(name) {
+          assert.ok(draft.has(name), `transaction must include ${name}`);
+          const map = draft.get(name);
+          const request = (run) => {
+            const result = { result: undefined, error: null, onsuccess: null, onerror: null };
+            queue.push(() => {
+              if (aborted) return;
+              try { result.result = run(); result.onsuccess?.(); }
+              catch (error) { result.error = tx.error = error; result.onerror?.(); tx.abort(); }
+            });
+            return result;
+          };
+          return {
+            put(value, key) {
+              const clone = structuredClone(value);
+              return request(() => map.set(key ?? clone.id, clone));
+            },
+            delete(key) { return request(() => map.delete(key)); },
+            clear() { return request(() => map.clear()); },
+            get(key) { return request(() => structuredClone(map.get(key))); },
+            getAll() { return request(() => structuredClone([...map.values()])); },
+            getAllKeys() { return request(() => [...map.keys()]); },
+          };
+        },
+      };
+      queueMicrotask(() => {
+        while (queue.length && !aborted) queue.shift()();
+        if (mode === "readwrite") {
+          const callback = beforeComplete; beforeComplete = null; callback?.();
+          if (failNext) { failNext = false; tx.error = new Error("simulated disk failure"); tx.abort(); }
+        }
+        if (aborted) return;
+        if (mode === "readwrite") for (const name of stores) data.set(name, draft.get(name));
+        tx.oncomplete?.();
+      });
+      return tx;
+    },
+  };
+}
 try {
+  await check("selected source and root publish only with a successful scan", async () => {
+    const value = library(), a = fixture("same.mp3", "red"), b = fixture("same.mp3", "tan");
+    const rootA = directory("A", a), rootB = directory("B", b, true);
+    window.showDirectoryPicker = async () => rootA;
+    assert.equal(await value.pick(), true);
+    assert.equal(value.source, null, "the picker creates a candidate, not a published source");
+    assert.equal(value.hasSource, true);
+    assert.equal((await value.scan(() => {})).phase, "done");
+    const selected = value.tracks[0], sourceA = value.source, savedA = await value.store.root();
+    window.showDirectoryPicker = async () => rootB;
+    assert.equal(await value.pick(), true);
+    assert.equal(value.source, sourceA); assert.deepEqual(await value.store.root(), savedA);
+    assert.equal(await value.file(selected), a, "old rows keep using their own published source");
+    assert.equal((await value.scan(() => {})).phase, "error");
+    assert.equal(value.tracks[0], selected); assert.equal(value.source, sourceA);
+    assert.deepEqual(await value.store.root(), savedA);
+    await value.restore(); assert.equal(value.label, "A"); assert.equal(await value.file(value.tracks[0]), a);
+    rootB.values = async function* () { yield { kind: "file", name: b.name, getFile: async () => b }; };
+    window.showDirectoryPicker = async () => rootB;
+    await value.pick(); assert.equal((await value.scan(() => {})).phase, "done");
+    assert.equal(value.label, "B"); assert.equal((await value.store.root()).name, "B");
+    assert.equal(await value.file(selected), null, "a retained old track cannot resolve against the new catalogue");
+    assert.equal(await value.coverUrl(selected), null, "a retained old cover cannot resolve against the new catalogue");
+    delete window.showDirectoryPicker;
+  });
+  await check("over-limit candidates require explicit splitting and parse one stable volume", async () => {
+    const value = await seed(), selected = value.tracks[0], sourceBefore = value.source;
+    const files = Array.from({length: 1001}, (_, index) => fixture(`track-${String(index).padStart(4, "0")}.mp3`, null));
+    let reads = 0;
+    for (const file of files) { const slice = file.slice.bind(file); file.slice = (...args) => { reads++; return slice(...args); }; }
+    value.useFiles([...files].reverse());
+    await assert.rejects(value.scan(() => {}), error => error.name === "PlaylistLimitError" && error.total === 1001 && error.parts === 2);
+    assert.equal(reads, 0, "the limit is checked before any metadata bytes are read");
+    assert.equal(value.source, sourceBefore); assert.equal(value.tracks[0], selected);
+    const first = await value.scan(() => {}, {split: true});
+    assert.equal(first.totalFiles, 1001); assert.equal(first.parts, 2); assert.equal(first.part, 0);
+    assert.equal(first.parsed, 1000); assert.equal(value.tracks.length, 1000);
+    assert.equal(value.tracks[0].name, "track-0000.mp3"); assert.equal(value.tracks.at(-1).name, "track-0999.mp3");
+    const second = await value.scan(() => {}, {part: 1});
+    assert.equal(second.parsed, 1); assert.equal(second.part, 1); assert.equal(value.tracks.length, 1);
+    assert.equal(value.tracks[0].name, "track-1000.mp3");
+    assert.equal((await value.store.allTracks()).length, 1, "inactive volumes have no stored index");
+  });
+  await check("directory discovery opens only the chosen volume, and restores that volume after reload", async () => {
+    const value = library();
+    const files = Array.from({length: 1001}, (_, index) => fixture(`track-${String(index).padStart(4, "0")}.mp3`, null));
+    const opened = [];
+    const handle = {kind: "directory", name: "Split directory", async *values() {
+      for (const file of [...files].reverse()) yield {kind: "file", name: file.name, getFile: async () => { opened.push(file.name); return file; }};
+      yield {kind: "file", name: "notes.txt", getFile: async () => { throw new Error("non-audio files must not be opened"); }};
+    }, async getFileHandle(name) { return {getFile: async () => files.find(file => file.name === name)}; }};
+    window.showDirectoryPicker = async () => handle;
+    await value.pick();
+    await assert.rejects(value.scan(() => {}), error => error.name === "PlaylistLimitError");
+    assert.deepEqual(opened, [], "counting and the split prompt must not open audio files");
+    assert.equal((await value.scan(() => {}, {split: true, part: 1})).parsed, 1);
+    assert.deepEqual(opened, ["track-1000.mp3"]);
+    assert.equal((await value.store.root()).part, 1);
+    await value.restore();
+    assert.equal(value.playlistSource().part, 1); assert.equal(value.tracks[0].name, "track-1000.mp3");
+    opened.length = 0;
+    assert.equal((await value.scan(() => {})).reused, 1);
+    assert.deepEqual(opened, ["track-1000.mp3"], "an active-volume rescan must not open the other thousand files");
+    const invalid = await value.scan(() => {}, {part: 2});
+    assert.equal(invalid.phase, "error"); assert.equal(value.tracks[0].name, "track-1000.mp3");
+    delete window.showDirectoryPicker;
+  });
+  await check("IDB commits root, active tracks and covers together, with full rollback on clone, disk or cancellation failures", async () => {
+    const value = await seed(), initial = (await value.store.allTracks())[0];
+    const store = new MusicStore(), db = indexedDbFixture(); store.db = db;
+    const a = {...initial, id: "a", hasCover: true}, b = {...initial, id: "b", hasCover: true};
+    const rootA = {name: "A", handle: {kind: "directory", name: "A"}, savedAt: 1, part: 0};
+    const rootB = {name: "B", handle: {kind: "directory", name: "B"}, savedAt: 2, part: 1};
+    await store.commitScan([a], [{id: "a", blob: new Blob(["A"])}], {root: rootA});
+    const unchanged = async () => {
+      assert.deepEqual(await store.root(), rootA);
+      assert.deepEqual((await store.allTracks()).map(track => track.id), ["a"]);
+      assert.equal(await (await store.cover("a")).text(), "A");
+      assert.equal(await store.cover("b"), undefined);
+    };
+    await assert.rejects(store.commitScan([b], [{id: "b", blob: () => {}}], {root: rootB}), error => error.name === "DataCloneError");
+    await unchanged();
+    db.failNext();
+    await assert.rejects(store.commitScan([b], [{id: "b", blob: new Blob(["B"])}], {root: rootB}), /simulated disk failure/);
+    await unchanged();
+    const controller = new AbortController(); db.beforeComplete(() => controller.abort());
+    await assert.rejects(store.commitScan([b], [{id: "b", blob: new Blob(["B"])}], {root: rootB, signal: controller.signal}), error => error.name === "AbortError");
+    await unchanged();
+    await store.commitScan([b], [{id: "b", blob: new Blob(["B"])}], {root: rootB});
+    assert.deepEqual(await store.root(), rootB); assert.equal((await store.allTracks())[0].id, "b");
+    assert.equal(await store.cover("a"), undefined); assert.equal(await (await store.cover("b")).text(), "B");
+    await store.putPlaylists([{id: "second", name: "Second", kind: "browser", part: 1}], "second");
+    assert.equal((await store.root()).playlistId, "second"); assert.equal((await store.playlists())[0].part, 1);
+    const presetAbort = new AbortController(); db.beforeComplete(() => presetAbort.abort());
+    await assert.rejects(store.putPlaylists([{id: "obsolete", name: "Obsolete", kind: "browser", part: 0}], "obsolete",
+      {signal: presetAbort.signal}), error => error.name === "AbortError");
+    assert.equal((await store.root()).playlistId, "second"); assert.equal((await store.playlists())[0].id, "second");
+  });
+  await check("directory presets store mappings and restore the active volume", async () => {
+    const value = library(), file = fixture("playlist.mp3", null), handle = directory("Preset root", file);
+    const presets = [{id: "browser-test", name: "My playlist", kind: "browser", handle, part: 0, total: 1},
+      {id: "vlc-test", name: "Native playlist", kind: "vlc", root: "D:\\SyntheticMusic", part: 0, total: 5}];
+    assert.equal(await value.usePlaylist(presets[0]), true);
+    assert.equal((await value.scan(() => {})).phase, "done");
+    await value.savePlaylists(presets, "browser-test");
+    assert.deepEqual(await value.playlists(), presets);
+    assert.equal((await value.store.allTracks()).length, 1);
+    const saved = await value.store.root(); assert.equal(saved.playlistId, "browser-test"); assert.equal(saved.part, 0);
+    await value.restore(); assert.equal(value.currentRoot.playlistId, "browser-test");
+    assert.equal(value.playlistSource().total, 1); assert.equal(value.playlistSource().part, 0);
+    assert.equal(await value.usePlaylist(presets[1]), false, "VLC mappings must not become browser file handles");
+  });
+  await check("an obsolete preset save cannot associate a newer folder, and cancellation still allows later preset edits", async () => {
+    const value = library(), fileA = fixture("a.mp3", null), fileC = fixture("c.mp3", null);
+    const a = {id: "A", name: "A", kind: "browser", handle: directory("A", fileA), part: 0, total: 1};
+    const c = {id: "C", name: "C", kind: "browser", handle: directory("C", fileC), part: 0, total: 1};
+    await value.usePlaylist(a); await value.scan(() => {}); await value.savePlaylists([a], a.id);
+    const open = value.store.open.bind(value.store), gate = deferred(); let calls = 0;
+    value.store.open = async () => { if (++calls === 1) await gate.promise; return open(); };
+    const saving = assert.rejects(value.savePlaylists([{...a, name: "Obsolete"}], a.id), error => error.name === "AbortError");
+    await settle(); await value.usePlaylist(c); await value.scan(() => {}); await value.savePlaylists([a, c], c.id);
+    gate.resolve(); await saving; value.store.open = open;
+    assert.equal((await value.store.root()).playlistId, c.id); assert.equal(value.currentRoot.playlistId, c.id);
+    assert.deepEqual((await value.playlists()).map(item => item.name), ["A", "C"]);
+    value.useFiles([fixture("cancelled.mp3", null)]);
+    const scan = value.scan(() => {}); value.cancelScan(); assert.equal((await scan).phase, "cancelled");
+    await value.savePlaylists([{...a, name: "Edited after cancel"}, c]);
+    assert.equal((await value.playlists())[0].name, "Edited after cancel");
+  });
+  await check("an unsplit preset whose folder grows past the limit must ask again", async () => {
+    const value = library(), file = fixture("old.mp3", null), handle = directory("Growing", file);
+    const preset = {id: "unsplit", name: "Growing", kind: "browser", handle, part: 0, total: 1};
+    await value.usePlaylist(preset); await value.scan(() => {});
+    const selected = value.tracks[0];
+    handle.values = async function* () {
+      for (let index = 0; index < 1001; index++) yield {kind: "file", name: `track-${index}.mp3`, getFile: async () => { throw new Error("no file may be opened before the choice"); }};
+    };
+    await value.usePlaylist(preset);
+    await assert.rejects(value.scan(() => {}), error => error.name === "PlaylistLimitError");
+    assert.equal(value.tracks[0], selected);
+  });
+  await check("a failed IDB replacement preserves the published files, metadata and covers", async () => {
+    const value = library(), db = indexedDbFixture(); value.store.db = db;
+    const a = fixture("same.mp3", "red"), b = fixture("same.mp3", "tan", 2000);
+    value.useFiles([a]); await value.scan(() => {});
+    const original = value.tracks[0], originalSource = value.source;
+    value.useFiles([b]); db.failNext();
+    assert.equal((await value.scan(() => {})).phase, "error");
+    assert.equal(value.tracks[0], original); assert.equal(value.source, originalSource);
+    assert.equal(await value.file(original), a);
+    assert.match(await (await value.store.cover("same.mp3")).text(), /red/);
+    assert.equal((await value.store.allTracks())[0].modified, 1000);
+    assert.equal((await value.scan(() => {})).phase, "done");
+    assert.equal(await value.file(value.tracks[0]), b);
+    assert.match(await (await value.store.cover("same.mp3")).text(), /tan/);
+    assert.equal(await value.file(original), null);
+  });
+  await check("a late playback reconnect cannot cancel or replace a pending playlist", async () => {
+    const value = library(), a = fixture("same.mp3", "red"), b = fixture("same.mp3", "tan");
+    const rootA = directory("A", a), rootB = directory("B", b), permission = deferred();
+    window.showDirectoryPicker = async () => rootA; await value.pick(); await value.scan(() => {});
+    rootA.queryPermission = () => permission.promise;
+    const reconnecting = value.reconnect(); await settle();
+    window.showDirectoryPicker = async () => rootB; await value.pick();
+    assert.equal(await value.reconnect(), false, "a queued playback fallback must not invalidate the candidate");
+    permission.resolve("granted"); assert.equal(await reconnecting, false);
+    assert.equal((await value.scan(() => {})).phase, "done"); assert.equal(value.label, "B");
+    assert.equal(await value.file(value.tracks[0]), b);
+    delete window.showDirectoryPicker;
+  });
+  await check("an entirely unreadable candidate cannot replace a working catalogue with an empty one", async () => {
+    const value = await seed(), original = value.tracks[0], published = value.source;
+    window.showDirectoryPicker = async () => ({kind: "directory", name: "Denied files", async *values() {
+      yield {kind: "file", name: "unreadable.mp3", getFile: async () => { throw new Error("permission lost"); }};
+    }});
+    await value.pick(); const report = await value.scan(() => {});
+    assert.equal(report.phase, "error"); assert.equal(report.failed, 1);
+    assert.equal(value.tracks[0], original); assert.equal(value.source, published);
+    assert.equal((await value.store.allTracks())[0].id, original.id);
+    delete window.showDirectoryPicker;
+  });
+  await check("oversized historical catalogues remain candidates until a split is chosen", async () => {
+    const value = await seed(), original = value.tracks[0], handle = directory("Legacy", fixture("legacy.mp3", null));
+    const stored = (await value.store.allTracks())[0];
+    await value.store.commitScan(Array.from({length: 1001}, (_, index) => ({...stored, id: `legacy-${index}`, path: `legacy-${index}.mp3`})), [],
+      {root: {name: "Legacy", handle, savedAt: 1}});
+    await assert.rejects(value.restore(), error => error.name === "PlaylistLimitError" && error.total === 1001);
+    assert.equal(value.tracks[0], original); assert.equal(value.hasSource, true);
+    assert.equal((await value.scan(() => {}, {split: true})).phase, "done");
+    assert.equal(value.tracks.length, 1);
+    const noHandle = library(); await noHandle.store.putTracks(Array.from({length: 1001}, (_, index) => ({...stored, id: String(index)})));
+    await assert.rejects(noHandle.restore(), error => error.name === "PlaylistLimitError");
+    assert.equal(noHandle.tracks.length, 0); assert.equal(noHandle.hasSource, false);
+  });
+  await check("cancellation before atomic source commit leaves the root and index paired", async () => {
+    const value = library(), a = fixture("same.mp3", "red"), b = fixture("same.mp3", "tan");
+    window.showDirectoryPicker = async () => directory("A", a);
+    await value.pick(); await value.scan(() => {});
+    const original = value.tracks[0], root = await value.store.root(), gate = deferred();
+    window.showDirectoryPicker = async () => directory("B", b); await value.pick();
+    const open = value.store.open.bind(value.store); let waiting = false;
+    value.store.open = async () => { waiting = true; await gate.promise; return open(); };
+    const pending = value.scan(() => {}); await settle();
+    assert.equal(waiting, true); value.cancelScan(); gate.resolve();
+    assert.equal((await pending).phase, "cancelled"); value.store.open = open;
+    assert.equal(value.tracks[0], original); assert.deepEqual(await value.store.root(), root);
+    assert.equal(await value.file(original), a); assert.equal((await value.store.allTracks())[0].id, original.id);
+    assert.equal((await value.scan(() => {})).phase, "done");
+    assert.equal((await value.store.root()).name, "B"); assert.equal(await value.file(value.tracks[0]), b);
+    delete window.showDirectoryPicker;
+  });
   await check("all 320 metadata records are indexed without preparing audio; explicit limits remain available", async () => {
     const value = library(); value.useFiles(Array.from({ length: 320 }, (_, index) => fixture(`track-${index}.mp3`, null)));
     const before = urls.size;
@@ -111,7 +387,10 @@ try {
       assert.equal(value.tracks.some(track => track.id === "obsolete.mp3"), false);
       assert.equal((await value.store.allTracks()).some(track => track.id === "obsolete.mp3"), false);
       if (action === "bridge") assert.equal(value.tracks[0].id, "current");
-      if (action === "files") assert.equal(value.source.label, "本次选择（不保存）");
+      if (action === "files") {
+        assert.equal(value.hasSource, true);
+        assert.equal(value.source.label, "Synthetic", "a new candidate does not replace the published source");
+      }
       if (action === "clear") assert.deepEqual(await value.store.allTracks(), []);
     }
   });
@@ -176,6 +455,21 @@ try {
     assert.equal(value.tracks[0].hasCover, false); assert.equal(await value.store.cover("same.mp3"), undefined);
     assert.equal(await value.coverUrl(value.tracks[0]), null);
   });
+  await check("late playback file reads and cover bytes cannot publish into a new same-path playlist", async () => {
+    const value = await seed(), oldTrack = value.tracks[0], fileGate = deferred(), coverGate = deferred();
+    value.source.resolve = () => fileGate.promise;
+    const oldCover = await value.store.cover(oldTrack.id);
+    oldCover.arrayBuffer = () => coverGate.promise;
+    const oldFile = value.file(oldTrack), oldUrl = value.coverUrl(oldTrack); await settle();
+    value.useFiles([fixture("old.mp3", "tan", 2000)]); await value.scan(() => {});
+    const newTrack = value.tracks[0], currentUrl = await value.coverUrl(newTrack);
+    const revocations = revoked.length;
+    fileGate.resolve(fixture("old.mp3", "red")); coverGate.resolve(new Uint8Array([1, 2, 3]).buffer);
+    assert.equal(await oldFile, null); assert.equal(await oldUrl, null);
+    assert.equal(revoked.length, revocations + 1, "the late materialized old blob is revoked");
+    assert.ok(urls.has(currentUrl)); assert.equal(await value.file(oldTrack), null);
+    assert.match(await (await value.store.cover(newTrack.id)).text(), /tan/);
+  });
   await check("LRU preserves pins and decoding leases, then revokes only unneeded old URLs", async () => {
     const value = library(2); const tracks = ["A", "B", "C", "D"].map(bridgeTrack);
     value.useBridgeTracks(tracks, "Cover fixtures");
@@ -190,7 +484,8 @@ try {
     assert.ok(urls.has(a)); assert.ok(urls.has(lease.url));
     assert.ok(revoked.includes(c) && revoked.includes(d));
     value.pinCoverIds([]); lease.release(); lease.release();
-    const e = await value.coverUrl({ ...bridgeTrack("E"), bridge: true });
+    const extra = { ...bridgeTrack("E"), bridge: true }; value.tracks.push(extra);
+    const e = await value.coverUrl(extra);
     await sleep(1100);
     assert.ok(revoked.includes(a), "oldest unpinned URL is evicted after leases are released");
     assert.ok(urls.has(e));

@@ -27,8 +27,8 @@ export type MusicFileEntry = {
   /** Path relative to the picked root; unique inside a library. */
   path: string;
   name: string;
-  size: number;
-  modified: number;
+  size?: number;
+  modified?: number;
   load(): Promise<File>;
 };
 
@@ -129,16 +129,13 @@ export function directorySource(handle: DirHandle, label = handle.name): MusicSo
           }
           const fileHandle = child as FileHandle;
           if (typeof fileHandle.getFile !== "function") continue;
-          // Size and mtime drive the incremental comparison, so the File object
-          // is materialized here and reused by the parser instead of re-read.
+          // Enumerate handles only; opening files waits until a volume is chosen.
           let cached: File | null = null;
           const load = async () => {
             if (!cached) cached = await fileHandle.getFile();
             return cached;
           };
-          const file = await load().catch(() => null);
-          if (!file) continue;
-          yield { path, name: child.name, size: file.size, modified: file.lastModified, load };
+          yield { path, name: child.name, load };
           if (++emitted >= MAX_FILES) return;
         }
       }

@@ -7,10 +7,10 @@
 import { escapeHtml } from "./html";
 import type { Sound } from "./audio";
 import { formatDuration, formatLibrarySize, matchSegments, tokenize, type SearchField } from "./music-search";
-import type { CoverLease, LibraryTrack, MusicLibrary, ScanProgress } from "./music-library";
+import type { CoverLease, LibraryTrack, MusicLibrary, MusicPlaylist, ScanProgress, ScanReport } from "./music-library";
 import type { MusicPlayer, PlayMode } from "./music-player";
-import type { BridgeScan, BridgeStatus, BridgeTrack } from "./music-bridge";
-import { directoryPickerSupported } from "./music-source";
+import type { BridgeCatalogue, BridgePlaylist, BridgeScan, BridgeStatus, BridgeTrack } from "./music-bridge";
+import { directoryPickerSupported, type MusicSource } from "./music-source";
 
 export type MusicPanelHost = {
   library: MusicLibrary;
@@ -32,13 +32,17 @@ export type MusicPanelHost = {
     pollStatus(): Promise<BridgeStatus | null>;
     library(): Promise<BridgeTrack[]>;
     rescan(full?: boolean): Promise<BridgeScan | null>;
+    readonly info?: { root: string; playlist?: BridgePlaylist } | null;
+    switchPlaylist(root: string, part?: number, split?: boolean): Promise<BridgeCatalogue>;
   };
   engine: () => "browser" | "vlc";
   canControl?: () => boolean;
   beforePlayback?: () => Promise<void> | void;
+  beforeLibraryChange?: () => Promise<void> | void;
   onSound: (sound: Sound, pan?: number) => void;
   onNotify: (message: string) => void;
   onOpenSettings: () => void;
+  onPlaylistPrompt?: () => void;
   onLibraryChanged?: () => void;
   onVolumeChange?: (value: number) => void;
   /** Whether surface/enter animations are enabled. */
@@ -97,6 +101,17 @@ export class MusicPanel {
   private lastEngineState = "";
   private coverRequest = 0;
   private coverLease: CoverLease | null = null;
+  private presets: MusicPlaylist[] = [];
+  private activePreset = "";
+  private presetRevision = 0;
+  private sessionSource: MusicSource | null = null;
+  private libraryBusy = false;
+  private limitPrompt: { total: number; parts: number; retry: () => Promise<void> } | null = null;
+
+  get switching() { return this.libraryBusy; }
+  promptOversizedLibrary(total: number, parts = Math.ceil(total / 1000)) {
+    this.showLimit(total, parts, () => this.startScan({ split: true }));
+  }
 
   constructor() {}
 
@@ -125,6 +140,7 @@ export class MusicPanel {
     this.bind(root, this.controller.signal);
     this.refreshIndex();
     this.renderAll();
+    void this.refreshPresets();
     if (!this.usingBridge && !this.host.library.tracks.length) void this.autoRestore();
   }
 
@@ -145,6 +161,7 @@ export class MusicPanel {
     this.scanAbort?.abort();
     this.scanAbort = null;
     this.scanText = "";
+    this.libraryBusy = false;
     this.bridgePending = false;
     this.host?.library.cancelScan();
   }
@@ -152,7 +169,7 @@ export class MusicPanel {
   private get canControl() { return this.host.canControl?.() ?? true; }
 
   private currentPlaybackRequest(request: number, engine: "browser" | "vlc") {
-    return request === this.playbackRequest && this.host.engine() === engine && this.canControl;
+    return request === this.playbackRequest && this.host.engine() === engine && this.canControl && !this.libraryBusy;
   }
 
   private currentLibraryRequest(request: number, engine: "browser" | "vlc") {
@@ -177,6 +194,7 @@ export class MusicPanel {
       this.bridgePending = false;
       this.renderStatus();
       this.renderBar();
+      this.renderPresets();
     }
     // Track changes can arrive without a panel gesture (MediaSession keys,
     // browser-engine next/previous); keep the highlight and bar in step.
@@ -235,6 +253,167 @@ export class MusicPanel {
     this.refreshIndex();
     this.cursor = -1;
     if (this.mounted) this.renderAll();
+    void this.refreshPresets();
+  }
+
+  private async refreshPresets() {
+    if (!this.library.playlists) return;
+    const request = this.libraryRequest;
+    const revision = ++this.presetRevision;
+    const saved = await this.library.playlists();
+    if (request !== this.libraryRequest || revision !== this.presetRevision || this.libraryBusy) return;
+    this.presets = [...saved, ...this.presets.filter(item => item.id.startsWith("session-"))];
+    const info = this.host.bridge.info?.playlist;
+    if (this.usingBridge && info) {
+      this.activePreset = this.presets.find(item => item.kind === "vlc" && item.root === info.root && item.part === info.part)?.id ?? "";
+      if (info.needsSplit && !this.limitPrompt) this.showLimit(info.total, info.parts, () => this.activateBridgeRoot(info.root, 0, true));
+    } else if (!this.usingBridge) {
+      const id = this.library.currentRoot?.playlistId ?? this.activePreset;
+      this.activePreset = this.presets.some(item => item.id === id) ? id : "";
+    }
+    this.renderPresets();
+  }
+
+  private renderPresets() {
+    const select = this.root?.querySelector<HTMLSelectElement>("#music-playlist");
+    if (!select) return;
+    const kind = this.usingBridge ? "vlc" : "browser";
+    const options = `<option value="">当前目录</option>${this.presets.filter(item => item.kind === kind).map(item =>
+      `<option value="${escapeHtml(item.id)}" ${item.id === this.activePreset ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}`;
+    if (select.innerHTML !== options) select.innerHTML = options;
+    select.value = this.presets.some(item => item.id === this.activePreset && item.kind === kind) ? this.activePreset : "";
+    select.disabled = this.libraryBusy || !this.canControl;
+    const pathField = this.root?.querySelector<HTMLElement>("#music-playlist-path-field");
+    if (pathField) pathField.hidden = !this.usingBridge;
+    const path = this.root?.querySelector<HTMLInputElement>("#music-playlist-path");
+    if (path && !path.value && this.usingBridge) path.value = this.host.bridge.info?.root ?? "";
+    const prompt = this.root?.querySelector<HTMLElement>("#music-playlist-limit");
+    if (prompt) {
+      prompt.hidden = !this.limitPrompt;
+      const html = this.limitPrompt
+        ? `<p>此文件夹有 ${this.limitPrompt.total} 首歌曲，每个歌单最多 1000 首。请选择：</p><div class="music-tools"><button data-music="playlist-split">自动拆成 ${this.limitPrompt.parts} 个歌单</button><button data-music="playlist-manual">返回自行整理</button></div><small>自动拆分只建立歌单范围，不移动音乐文件。</small>` : "";
+      if (prompt.innerHTML !== html) prompt.innerHTML = html;
+    }
+    for (const action of ["playlist-add", "playlist-rename", "playlist-remove", "pick", "scan"]) {
+      const button = this.root?.querySelector<HTMLButtonElement>(`[data-music="${action}"]`);
+      if (button && action !== "scan") button.disabled = this.libraryBusy || !this.canControl ||
+        ((action === "playlist-rename" || action === "playlist-remove") && !this.activePreset);
+    }
+  }
+
+  private showLimit(total: number, parts: number, retry: () => Promise<void>) {
+    this.limitPrompt = { total, parts, retry };
+    this.renderPresets();
+    this.host.onNotify(`文件夹有 ${total} 首歌曲，请选择自动拆分或自行整理`);
+    if (!this.mounted) this.host.onPlaylistPrompt?.();
+  }
+
+  private playlistName(fallback: string) {
+    return this.root?.querySelector<HTMLInputElement>("#music-playlist-name")?.value.trim() || fallback;
+  }
+
+  private async rememberBrowserPlaylist(report: ScanReport, request: number) {
+    ++this.presetRevision;
+    const sourceSnapshot = this.library.source;
+    const current = () => this.currentLibraryRequest(request, "browser") && this.library.source === sourceSnapshot;
+    const source = this.library.playlistSource();
+    if (!source || !current()) return;
+    if (source.handle) {
+      this.presets = this.presets.filter(item => !item.id.startsWith("session-"));
+      this.sessionSource = null;
+    }
+    if (!source.handle && this.sessionSource !== this.library.source) {
+      this.presets = this.presets.filter(item => !item.id.startsWith("session-"));
+      this.activePreset = "";
+      this.sessionSource = this.library.source;
+    }
+    let existing = this.presets.find(item => item.id === this.library.currentRoot?.playlistId);
+    if (!existing && source.handle) {
+      const handle = source.handle as { isSameEntry?(other: unknown): Promise<boolean> };
+      for (const preset of this.presets) {
+        if (preset.kind !== "browser" || !preset.handle) continue;
+        const same = preset.handle === source.handle || await handle.isSameEntry?.(preset.handle).catch(() => false);
+        if (!current()) return;
+        if (same) { existing = preset; break; }
+      }
+    }
+    if (!source.handle && !existing) existing = this.presets.find(item => item.id === this.activePreset && item.id.startsWith("session-"));
+    const base = existing?.id.replace(/-part-\d+$/, "") ?? `${source.handle ? "browser" : "session"}-${crypto.randomUUID()}`;
+    const name = this.playlistName(existing?.name.replace(/（\d+）$/, "") ?? source.name);
+    const previousNames = new Map(this.presets.filter(item => item.id.startsWith(`${base}-part-`)).map(item => [item.part, item.name]));
+    this.presets = this.presets.filter(item => !item.id.startsWith(`${base}-part-`));
+    for (let part = 0; part < report.parts; part++) this.presets.push({ id: `${base}-part-${part}`, name: previousNames.get(part) ?? (report.parts > 1 ? `${name}（${part + 1}）` : name),
+      kind: "browser", handle: source.handle, part, total: report.totalFiles });
+    this.activePreset = `${base}-part-${report.part}`;
+    await this.library.savePlaylists(this.presets.filter(item => !item.id.startsWith("session-")), this.activePreset);
+    if (current()) this.renderPresets();
+  }
+
+  async activatePlaylist(id: string) {
+    if (!this.canControl || this.libraryBusy) return;
+    const preset = this.presets.find(item => item.id === id);
+    if (!preset || preset.kind !== (this.usingBridge ? "vlc" : "browser")) return;
+    this.limitPrompt = null;
+    const input = this.root?.querySelector<HTMLInputElement>("#music-playlist-name");
+    if (input) input.value = preset.name.replace(/（\d+）$/, "");
+    if (preset.kind === "vlc") {
+      await this.activateBridgeRoot(preset.root!, preset.part, preset.part > 0 || (preset.total ?? 0) > 1000);
+      return;
+    }
+    this.cancelPending();
+    if (!preset.id.startsWith("session-") && !(await this.library.usePlaylist(preset))) {
+      this.renderPresets();
+      throw new Error("无法取得此歌单文件夹的读取权限");
+    }
+    await this.startScan({ part: preset.part, split: preset.part > 0 || (preset.total ?? 0) > 1000 });
+  }
+
+  private async activateBridgeRoot(root: string, part = 0, split = false) {
+    if (!this.canControl || this.libraryBusy || !this.bridgeAvailable()) return;
+    this.cancelPending();
+    const request = ++this.libraryRequest;
+    this.libraryBusy = true;
+    this.scanText = "正在加载歌单…";
+    this.renderStatus();
+    this.renderPresets();
+    try {
+      if (this.host.beforeLibraryChange) await this.host.beforeLibraryChange();
+      if (!this.currentLibraryRequest(request, "vlc")) return;
+      const result = await this.host.bridge.switchPlaylist(root, part, split);
+      if (!this.currentLibraryRequest(request, "vlc")) return;
+      this.library.useBridgeTracks(result.tracks, result.root);
+      this.host.bridge.queueTracks(result.tracks);
+      const folder = result.root.split(/[\\/]/).filter(Boolean).pop() || "本地歌单";
+      const name = this.playlistName(folder);
+      const known = this.presets.find(item => item.kind === "vlc" && item.root === result.root);
+      const base = known?.id.replace(/-part-\d+$/, "") ?? `vlc-${crypto.randomUUID()}`;
+      const previousNames = new Map(this.presets.filter(item => item.kind === "vlc" && item.root === result.root).map(item => [item.part, item.name]));
+      this.presets = this.presets.filter(item => item.kind !== "vlc" || item.root !== result.root);
+      for (let index = 0; index < result.playlist.parts; index++) this.presets.push({ id: `${base}-part-${index}`, name: previousNames.get(index) ?? (result.playlist.parts > 1 ? `${name}（${index + 1}）` : name),
+        kind: "vlc", root: result.root, part: index, total: result.playlist.total });
+      this.activePreset = `${base}-part-${result.playlist.part}`;
+      await this.library.savePlaylists(this.presets.filter(item => !item.id.startsWith("session-")));
+      this.bridgeStatus = null;
+      if (this.host.bridge.pollStatus) this.bridgeStatus = await this.host.bridge.pollStatus();
+      this.limitPrompt = null;
+      if (this.currentLibraryRequest(request, "vlc")) {
+        this.refreshLibrary();
+        this.host.onLibraryChanged?.();
+        this.host.onNotify(result.warning ? "歌单已加载，但未能保存重启记录" : `已加载歌单：${result.tracks.length} 首`);
+      }
+    } catch (error) {
+      if (!this.currentLibraryRequest(request, "vlc")) return;
+      const payload = (error as { payload?: { error?: string; total?: number; parts?: number } })?.payload;
+      if (payload?.error === "playlist_limit") this.showLimit(payload.total!, payload.parts!, () => this.activateBridgeRoot(root, part, true));
+      else throw error;
+    } finally {
+      if (request === this.libraryRequest) {
+        this.libraryBusy = false;
+        this.scanText = "";
+        this.renderStatus();
+        this.renderPresets();
+      }
+    }
   }
 
   // ------------------------------------------------------------------ markup
@@ -250,6 +429,13 @@ export class MusicPanel {
       (item) =>
         `<button data-music-field="${item.field}" class="${item.field === this.field ? "active" : ""}">${item.label}</button>`,
     ).join("")}<span class="music-tools"><button data-music="pick">${pickerSupported ? "选择目录" : "选择文件"}</button><button data-music="scan" disabled>重新扫描</button></span></div>
+<div class="music-playlists">
+  <label>歌单<select id="music-playlist" aria-label="切换歌单"><option value="">当前目录</option></select></label>
+  <label>名称<input id="music-playlist-name" maxlength="80" placeholder="歌单名称" aria-label="歌单名称"/></label>
+  <label id="music-playlist-path-field" hidden>文件夹<input id="music-playlist-path" placeholder="例如 D:\\Music\\Favorites" aria-label="歌单音乐文件夹"/></label>
+  <div class="music-tools"><button data-music="playlist-add">添加文件夹</button><button data-music="playlist-rename">重命名</button><button data-music="playlist-remove">删除预设</button></div>
+  <div id="music-playlist-limit" role="alert" hidden></div>
+</div>
 <div class="music-status" id="music-status" role="status"></div>
 <div class="result-header"><span>TRACK / 曲目</span><span>FORMAT / 格式</span><span>TIME / 时长</span></div>
 <div class="search-results" id="music-results" role="listbox" aria-label="本地音乐检索结果" tabindex="-1"></div>
@@ -279,6 +465,10 @@ export class MusicPanel {
   }
 
   private bind(root: HTMLElement, signal: AbortSignal) {
+    root.querySelector<HTMLSelectElement>("#music-playlist")?.addEventListener("change", (event) => {
+      const id = (event.target as HTMLSelectElement).value;
+      if (id) void this.activatePlaylist(id).catch(error => this.playbackFailed(error));
+    }, { signal });
     const input = root.querySelector<HTMLInputElement>("#music-search");
     let timer = 0;
     input?.addEventListener(
@@ -397,6 +587,8 @@ export class MusicPanel {
         const files = (event.target as HTMLInputElement).files;
         if (!files || !files.length || !this.host || !this.canControl || this.usingBridge) return;
         this.cancelPending();
+        this.presets = this.presets.filter(item => !item.id.startsWith("session-"));
+        this.activePreset = "";
         this.host.library.useFiles(files);
         void this.startScan().catch((error) => this.playbackFailed(error));
       },
@@ -414,7 +606,45 @@ export class MusicPanel {
 
   private async runAction(action: string) {
     if (!this.canControl && action !== "reset-search" && action !== "more") return;
+    if (this.libraryBusy && action !== "reset-search" && action !== "more") return;
     switch (action) {
+      case "playlist-add":
+        if (this.usingBridge) {
+          const root = this.root?.querySelector<HTMLInputElement>("#music-playlist-path")?.value.trim();
+          if (!root) { this.host.onNotify("请填写歌单对应的音乐文件夹"); return; }
+          await this.activateBridgeRoot(root);
+        } else await this.pickSource();
+        break;
+      case "playlist-rename": {
+        const name = this.root?.querySelector<HTMLInputElement>("#music-playlist-name")?.value.trim();
+        const preset = this.presets.find(item => item.id === this.activePreset);
+        if (!name || !preset) return;
+        ++this.presetRevision;
+        preset.name = name;
+        await this.library.savePlaylists(this.presets.filter(item => !item.id.startsWith("session-")));
+        this.renderPresets();
+        break;
+      }
+      case "playlist-remove":
+        ++this.presetRevision;
+        this.presets = this.presets.filter(item => item.id !== this.activePreset);
+        this.activePreset = "";
+        await this.library.savePlaylists(this.presets.filter(item => !item.id.startsWith("session-")));
+        this.renderPresets();
+        this.host.onNotify("已删除歌单预设，音乐文件保留");
+        break;
+      case "playlist-split": {
+        const pending = this.limitPrompt;
+        this.limitPrompt = null;
+        this.renderPresets();
+        if (pending) await pending.retry();
+        break;
+      }
+      case "playlist-manual":
+        this.limitPrompt = null;
+        this.renderPresets();
+        this.host.onNotify("请将歌曲整理到不同文件夹，再添加歌单；当前歌单保持不变");
+        break;
       case "toggle":
         this.host.onSound("ui-tick");
         await this.togglePlayback();
@@ -556,9 +786,10 @@ export class MusicPanel {
   }
 
   private async pickSource() {
-    if (!this.canControl) return;
+    if (!this.canControl || this.libraryBusy) return;
     if (this.usingBridge) {
-      this.host.onOpenSettings();
+      this.root?.querySelector<HTMLInputElement>("#music-playlist-path")?.focus();
+      this.host.onNotify("填写文件夹和歌单名称，再点击「添加文件夹」");
       return;
     }
     this.cancelPending();
@@ -580,8 +811,8 @@ export class MusicPanel {
     }
   }
 
-  async startScan() {
-    if (!this.canControl) return;
+  async startScan(options: { split?: boolean; part?: number } = {}) {
+    if (!this.canControl || this.libraryBusy) return;
     this.scanAbort?.abort();
     this.library.cancelScan();
     const request = ++this.libraryRequest;
@@ -589,11 +820,18 @@ export class MusicPanel {
     const current = () => this.currentLibraryRequest(request, engine);
     if (this.usingBridge) {
       if (!this.bridgeAvailable()) return;
+      if (this.host.bridge.info?.playlist?.needsSplit) {
+        const info = this.host.bridge.info.playlist;
+        this.showLimit(info.total, info.parts, () => this.activateBridgeRoot(info.root, 0, true));
+        return;
+      }
       // The bridge owns the folder; ask it to rescan and re-read the catalogue.
       this.host.onSound("scan");
       this.scanText = "VLC 桥接正在重新扫描…";
+      this.libraryBusy = true;
       this.lastStatus = "";
       this.renderStatus();
+      this.renderPresets();
       try {
         const report = await this.host.bridge.rescan();
         if (!current() || !this.host.bridge.connected) return;
@@ -611,30 +849,45 @@ export class MusicPanel {
             : `VLC 曲库已更新：${tracks.length} 首`,
         );
         this.host.onSound("confirm");
-      } catch {
+      } catch (error) {
         if (!current()) return;
         this.scanText = "";
         this.renderStatus();
-        this.host.onNotify("VLC 桥接重新扫描失败");
+        const payload = (error as { payload?: { error?: string; total?: number; parts?: number } })?.payload;
+        if (payload?.error === "playlist_limit") this.showLimit(payload.total!, payload.parts!, () => this.activateBridgeRoot(this.host.bridge.info!.root, 0, true));
+        else this.host.onNotify("VLC 桥接重新扫描失败");
+      } finally {
+        if (request === this.libraryRequest) this.libraryBusy = false;
+        this.renderStatus();
+        this.renderPresets();
       }
       return;
     }
-    if (!this.library.source) {
+    if (!this.library.hasSource) {
       await this.pickSource();
       return;
     }
     const controller = new AbortController();
     this.scanAbort = controller;
+    this.libraryBusy = true;
+    this.renderPresets();
     this.host.onSound("scan");
     this.scanText = "正在读取目录…";
     this.renderStatus();
     let report;
     try {
+      if (this.host.beforeLibraryChange) await this.host.beforeLibraryChange();
+      if (!current() || controller.signal.aborted) return;
       report = await this.library.scan((progress) => {
         if (current() && !controller.signal.aborted) this.renderScanProgress(progress);
-      }, { signal: controller.signal });
+      }, { ...options, signal: controller.signal });
     } catch (error) {
-      if (current() && !controller.signal.aborted) this.host.onNotify(error instanceof Error ? error.message : "扫描失败");
+      if (current() && !controller.signal.aborted) {
+        if (error instanceof Error && error.name === "PlaylistLimitError") {
+          const limit = error as Error & { total: number; parts: number };
+          this.showLimit(limit.total, limit.parts, () => this.startScan({ ...options, split: true }));
+        } else this.host.onNotify(error instanceof Error ? error.message : "扫描失败");
+      }
       return;
     } finally {
       if (current()) {
@@ -642,27 +895,41 @@ export class MusicPanel {
         this.scanText = "";
         this.renderStatus();
       }
+      if (request === this.libraryRequest && report?.phase !== "done") this.libraryBusy = false;
+      this.renderPresets();
     }
     if (!current() || controller.signal.aborted || report.phase === "cancelled") return;
-    this.refreshLibrary();
-    this.host.onLibraryChanged?.();
     if (report.phase === "error") {
       this.host.onNotify("扫描中断，已保留原有曲库");
       return;
     }
-    const parts = [`${report.total} 首曲目`];
-    if (report.added) parts.push(`新增 ${report.added}`);
-    if (report.updated) parts.push(`更新 ${report.updated}`);
-    if (report.removed) parts.push(`移除 ${report.removed}`);
-    if (report.failed) parts.push(`跳过 ${report.failed}`);
-    if (report.reused) parts.push(`沿用 ${report.reused}`);
-    this.host.onNotify(`曲库已更新：${parts.join(" · ")}（${(report.ms / 1000).toFixed(1)}s）`);
-    this.host.onSound("confirm");
+    try {
+      try { await this.rememberBrowserPlaylist(report, request); }
+      catch { if (current()) this.host.onNotify("歌单已加载，但未能保存预设"); }
+      if (!current()) return;
+      this.limitPrompt = null;
+      this.renderPresets();
+      this.refreshLibrary();
+      this.host.onLibraryChanged?.();
+      const parts = [`${report.total} 首曲目`];
+      if (report.added) parts.push(`新增 ${report.added}`);
+      if (report.updated) parts.push(`更新 ${report.updated}`);
+      if (report.removed) parts.push(`移除 ${report.removed}`);
+      if (report.failed) parts.push(`跳过 ${report.failed}`);
+      if (report.reused) parts.push(`沿用 ${report.reused}`);
+      this.host.onNotify(`曲库已更新：${parts.join(" · ")}（${(report.ms / 1000).toFixed(1)}s）`);
+      this.host.onSound("confirm");
+    } finally {
+      if (request === this.libraryRequest) this.libraryBusy = false;
+      this.renderStatus();
+      this.renderPresets();
+      void this.refreshPresets();
+    }
   }
 
   private async autoRestore() {
     if (this.usingBridge || !this.canControl) return;
-    if (this.library.source) {
+    if (this.library.hasSource) {
       this.renderStatus();
       return;
     }
@@ -670,7 +937,13 @@ export class MusicPanel {
     // still needs a gesture to grant read permission again, which the panel
     // offers through the "恢复曲库" button.
     const request = ++this.libraryRequest;
-    const restored = await this.library.restore().catch(() => false);
+    const restored = await this.library.restore().catch(error => {
+      if (error instanceof Error && error.name === "PlaylistLimitError") {
+        const limit = error as Error & { total: number; parts: number };
+        this.promptOversizedLibrary(limit.total, limit.parts);
+      }
+      return false;
+    });
     if (!this.currentLibraryRequest(request, "browser")) return;
     if (restored) {
       this.refreshLibrary();
@@ -784,7 +1057,7 @@ export class MusicPanel {
       engine.innerHTML = `${this.usingBridge ? "VLC 内核" : "浏览器内核"} <i>●</i> ${live ? "CONNECTED" : this.usingBridge ? "OFFLINE / 等待重连" : "STANDBY"}`;
     }
     const scanButton = this.root?.querySelector<HTMLElement>('[data-music="scan"]');
-    if (scanButton) scanButton.toggleAttribute("disabled", !live || !this.canControl);
+    if (scanButton) scanButton.toggleAttribute("disabled", !live || !this.canControl || this.libraryBusy || this.library.scanning);
   }
 
   private renderScanProgress(progress: ScanProgress) {

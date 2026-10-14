@@ -23,6 +23,7 @@ const args = process.argv.slice(2);
 const rootIndex = args.indexOf("--root");
 const musicRoot = rootIndex >= 0 ? args[rootIndex + 1] : join(LOCAL_ROOT, "fixtures", `bridge-check-run-${process.pid}`);
 const temporary = rootIndex < 0;
+const playlistRoot = join(LOCAL_ROOT, "fixtures", `bridge-playlists-run-${process.pid}`);
 const headlessAudio = process.env.RHINE_VLC_AOUT === "dummy";
 if (headlessAudio) console.log("# dummy audio output: physical volume checks require a real-output run");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -85,6 +86,7 @@ if (temporary) {
 const bridge = spawn(process.execPath, [
   "--experimental-strip-types", join(ROOT, "scripts", "vlc-bridge.mjs"),
   "--root", musicRoot, "--port", String(PORT), "--token", TOKEN,
+  "--no-save-playlist",
   ...(process.env.RHINE_VLC_AOUT ? ["--aout", process.env.RHINE_VLC_AOUT] : []),
 ], { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
 let log = "";
@@ -101,6 +103,10 @@ const request = async (path, headers = auth) => {
     body = text;
   }
   return { status: response.status, body };
+};
+const playlistRequest = async (body, headers = auth) => {
+  const response = await fetch(`${base}/api/playlist`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  return { status: response.status, body: await response.json() };
 };
 
 let passed = 0;
@@ -265,6 +271,50 @@ try {
     await request("/api/stop");
   });
 
+  await step("歌单切换端点鉴权与请求边界", async () => {
+    assert.equal((await playlistRequest({ root: musicRoot }, {})).status, 401);
+    assert.equal((await request("/api/playlist")).status, 405);
+    assert.equal((await playlistRequest({ root: musicRoot, part: -1 })).status, 400);
+    assert.equal((await playlistRequest({ root: musicRoot, split: "yes" })).status, 400);
+    const before = (await request("/api/library")).body;
+    assert.equal((await playlistRequest({ root: join(playlistRoot, "absent") })).status, 400);
+    assert.deepEqual((await request("/api/library")).body.tracks, before.tracks);
+  });
+
+  if (temporary) await step("超限保留旧歌单，接受分卷后停止旧准备并只加载当前1000首", async () => {
+    await resetLocalDirectory(playlistRoot);
+    const sample = mp3WithCover();
+    for (let first = 0; first < 1001; first += 50)
+      await Promise.all(Array.from({ length: Math.min(50, 1001 - first) }, (_, index) => writeFile(join(playlistRoot, `${String(first + index).padStart(4, "0")}.mp3`), sample)));
+    const pending = await request(`/api/prepare?id=${low.id}&client=playlist-check&sequence=1`);
+    assert.equal(pending.status, 200);
+    const denied = await playlistRequest({ root: playlistRoot });
+    assert.equal(denied.status, 409); assert.equal(denied.body.error, "playlist_limit"); assert.equal(denied.body.total, 1001); assert.equal(denied.body.parts, 2);
+    assert.equal((await request("/api/status")).body.prepared, true, "拒绝超限不能清除旧准备");
+    assert.equal((await request("/api/library")).body.root, library.body.root);
+    const switching = playlistRequest({ root: playlistRoot, part: 0, split: true });
+    let scanning = false;
+    for (let attempt = 0; attempt < 80; attempt++) {
+      const health = (await request("/api/health")).body;
+      if (health.scan.phase === "reading") { scanning = true; break; }
+      await sleep(10);
+    }
+    assert.equal(scanning, true, "没有观察到生成曲库的扫描阶段");
+    assert.equal((await request("/api/scan")).status, 409, "切换期间不能把旧目录重扫排到新歌单之后");
+    const first = await switching;
+    assert.equal(first.status, 200); assert.equal(first.body.tracks.length, 1000); assert.equal(first.body.playlist.part, 0); assert.equal(first.body.playlist.split, true);
+    assert.equal((await request(`/api/start?ticket=${pending.body.ticket}`)).status, 409);
+    assert.equal((await request(`/api/play?id=${low.id}`)).status, 400);
+    assert.equal((await request("/api/status")).body.currentId, null);
+    assert.equal((await playlistRequest({ root: playlistRoot, part: 2, split: true })).status, 409);
+    assert.equal((await request("/api/library")).body.tracks.length, 1000);
+    const second = await playlistRequest({ root: playlistRoot, part: 1, split: true });
+    assert.equal(second.status, 200); assert.equal(second.body.tracks.length, 1); assert.equal(second.body.tracks[0].name, "1000.mp3");
+    const restored = await playlistRequest({ root: musicRoot });
+    assert.equal(restored.status, 200); assert.equal(restored.body.tracks.length, library.body.tracks.length);
+    assert.equal((await request("/api/status")).body.state, "stopped");
+  });
+
   console.log(`\n${passed} VLC bridge checks passed.`);
 } catch (error) {
   console.error(`\nFAILED: ${error.message}`);
@@ -274,4 +324,5 @@ try {
   await stopProcessTree(bridge);
   await sleep(400);
   if (temporary && !existsSync(join(musicRoot, "keep"))) await removeLocalDirectory(musicRoot).catch(() => {});
+  if (temporary) await removeLocalDirectory(playlistRoot).catch(() => {});
 }

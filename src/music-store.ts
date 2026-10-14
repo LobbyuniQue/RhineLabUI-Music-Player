@@ -1,8 +1,8 @@
 // Local music persistence.
 //
 // The library index, the remembered directory handle and cover thumbnails live
-// in IndexedDB — the project's first use of it, because a 10k track catalogue
-// cannot go into localStorage. Everything degrades to an in-memory map when
+// in IndexedDB so directory handles and cover blobs can survive a reload.
+// Everything degrades to an in-memory map when
 // IndexedDB is unavailable (private windows, blocked storage), so the music
 // panel still works for the current session instead of failing outright.
 
@@ -29,7 +29,19 @@ export type StoredTrack = {
   added: number;
 };
 
-export type StoredRoot = { name: string; handle: unknown; savedAt: number };
+export type MusicPlaylist = {
+  id: string;
+  name: string;
+  kind: "browser" | "vlc";
+  root?: string;
+  handle?: unknown;
+  part: number;
+  total?: number;
+};
+export type StoredRoot = {
+  name: string; handle: unknown; savedAt: number;
+  part?: number; parts?: number; total?: number; split?: boolean; playlistId?: string;
+};
 
 const DB_NAME = "rhine-music";
 const DB_VERSION = 1;
@@ -37,6 +49,7 @@ const TRACKS = "tracks";
 const COVERS = "covers";
 const META = "meta";
 const ROOT_KEY = "root";
+const PLAYLISTS_KEY = "playlists";
 
 function promisify<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -74,7 +87,8 @@ export class MusicStore {
     tracks: Map<string, StoredTrack>;
     covers: Map<string, Blob>;
     root: StoredRoot | null;
-  } = { tracks: new Map(), covers: new Map(), root: null };
+    playlists: MusicPlaylist[];
+  } = { tracks: new Map(), covers: new Map(), root: null, playlists: [] };
   private fallback = false;
 
   get persistent() {
@@ -173,30 +187,80 @@ export class MusicStore {
   /** Replace one complete scan atomically. Cancellation aborts the IndexedDB
    * transaction; the memory fallback publishes both maps in one synchronous step. */
   async commitScan(tracks: readonly StoredTrack[], covers: readonly { id: string; blob: Blob }[],
-    options: { signal?: AbortSignal } = {}): Promise<void> {
-    const { signal } = options;
+    options: { signal?: AbortSignal; root?: StoredRoot | null } = {}): Promise<void> {
+    const { signal, root } = options;
     checkCancelled(signal);
     const persistent = await this.open();
     checkCancelled(signal);
     const keepCovers = new Set(tracks.filter(track => track.hasCover).map(track => track.id));
     if (persistent) {
-      const tx = this.db!.transaction([TRACKS, COVERS], "readwrite");
+      const tx = this.db!.transaction([TRACKS, COVERS, META], "readwrite");
       const trackStore = tx.objectStore(TRACKS), coverStore = tx.objectStore(COVERS);
       const completion = finishTransaction(tx, signal);
-      trackStore.clear();
-      for (const track of tracks) trackStore.put(track);
-      for (const cover of covers) coverStore.put(cover.blob, cover.id);
-      const keys = coverStore.getAllKeys();
-      keys.onsuccess = () => {
-        for (const key of keys.result) if (!keepCovers.has(String(key))) coverStore.delete(key);
-      };
-      await completion;
+      try {
+        if (root !== undefined) {
+          const meta = tx.objectStore(META);
+          if (root) meta.put(root, ROOT_KEY);
+          else meta.delete(ROOT_KEY);
+        }
+        trackStore.clear();
+        for (const track of tracks) trackStore.put(track);
+        for (const cover of covers) coverStore.put(cover.blob, cover.id);
+        const keys = coverStore.getAllKeys();
+        keys.onsuccess = () => {
+          for (const key of keys.result) if (!keepCovers.has(String(key))) coverStore.delete(key);
+        };
+        await completion;
+      } catch (error) {
+        // A synchronous clone/validation failure does not automatically abort IDB.
+        try { tx.abort(); } catch { /* already complete */ }
+        await completion.catch(() => {});
+        throw error;
+      }
       return;
     }
     const nextCovers = new Map([...this.memory.covers].filter(([id]) => keepCovers.has(id)));
     for (const cover of covers) nextCovers.set(cover.id, cover.blob);
     checkCancelled(signal);
-    this.memory = { ...this.memory, tracks: new Map(tracks.map(track => [track.id, track])), covers: nextCovers };
+    this.memory = { ...this.memory, tracks: new Map(tracks.map(track => [track.id, track])), covers: nextCovers,
+      root: root === undefined ? this.memory.root : root };
+  }
+
+  async playlists(): Promise<MusicPlaylist[]> {
+    if (await this.open()) {
+      const tx = this.db!.transaction(META, "readonly");
+      return (await promisify(tx.objectStore(META).get(PLAYLISTS_KEY) as IDBRequest<MusicPlaylist[] | undefined>)) ?? [];
+    }
+    return [...this.memory.playlists];
+  }
+
+  async putPlaylists(playlists: readonly MusicPlaylist[], activeId?: string,
+    options: { signal?: AbortSignal } = {}): Promise<void> {
+    const { signal } = options;
+    checkCancelled(signal);
+    const active = playlists.find(item => item.id === activeId && item.kind === "browser");
+    const persistent = await this.open();
+    checkCancelled(signal);
+    if (persistent) {
+      const tx = this.db!.transaction(META, "readwrite"), meta = tx.objectStore(META);
+      const completion = finishTransaction(tx, signal);
+      try {
+        meta.put([...playlists], PLAYLISTS_KEY);
+        if (active) {
+          const root = meta.get(ROOT_KEY) as IDBRequest<StoredRoot | undefined>;
+          root.onsuccess = () => { if (root.result) meta.put({ ...root.result, playlistId: active.id }, ROOT_KEY); };
+        }
+        await completion;
+      } catch (error) {
+        try { tx.abort(); } catch { /* already complete */ }
+        await completion.catch(() => {});
+        throw error;
+      }
+      return;
+    }
+    checkCancelled(signal);
+    this.memory.playlists = [...playlists];
+    if (active && this.memory.root) this.memory.root = { ...this.memory.root, playlistId: active.id };
   }
 
   async putRoot(root: StoredRoot, signal?: AbortSignal): Promise<void> {

@@ -1,5 +1,7 @@
 # 项目工具
 
+0.1.5 新增 `check-music-playlists.mjs`（面板超限两分支、分卷切换与预设）、`check-native-playlists.mjs`（原生串行扫描、卷与封面/恢复）、`check-vlc-fetch.mjs`（严格 SHA 和复用指针）、`check-archive-ui.mjs`（分组记忆与检索分页）、`check-viewer-updates.mjs`（静止复用与时间）、`check-cdp.mjs`（共享测试通信）；全部纳入 `npm run check`。实际 Windows 测试另见 [歌单验证记录](../verification/MUSIC-PLAYLISTS.md)。
+
 构建、启动和既有 `check-*.mjs` 保留在本目录，常用命令由 `package.json` 提供。
 
 | 入口 | 用途 |

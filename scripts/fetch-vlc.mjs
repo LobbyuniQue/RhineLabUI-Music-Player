@@ -15,7 +15,7 @@ import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { createHash } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -61,9 +61,19 @@ async function exists(path) {
 async function alreadyInstalled() {
   if (!(await exists(VLC_EXE))) return false;
   if (force) return false;
-  const version = (await readFile(join(TARGET, "VERSION.txt"), "utf8").catch(() => "")).split("\n")[0];
-  log(`already installed: ${version || "VLC"} (${VLC_EXE})`);
+  const record = await readFile(join(TARGET, "VERSION.txt"), "utf8").catch(() => "");
+  const version = record.match(/^(\d+\.\d+\.\d+)/)?.[1];
+  const hash = record.match(/^SHA256 ([a-f0-9]{64})\r?$/m)?.[1];
+  if (version !== VERSION || !hash) return false;
+  // A new checkout still needs its own pointer to the shared installation.
+  await recordPointer(version, hash);
+  log(`already installed: ${version} (${VLC_EXE})`);
   return true;
+}
+
+async function recordPointer(version, hash) {
+  await mkdir(dirname(POINTER), { recursive: true });
+  await writeFile(POINTER, JSON.stringify({ exe: VLC_EXE, version, arch: ARCH, sha256: hash, projectAscii: projectIsAscii }, null, 2), "utf8");
 }
 
 async function download(url, file) {
@@ -123,11 +133,14 @@ async function unzipInto(zipPath, destination, stripPrefix = true) {
     if (!name || file.name.endsWith("/")) continue;
     const target = join(destination, name);
     // The archive only contains relative paths; reject anything else outright.
-    if (!target.startsWith(destination)) throw new Error(`unsafe archive entry: ${file.name}`);
+    const child = relative(destination, target);
+    if (child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child))
+      throw new Error(`unsafe archive entry: ${file.name}`);
     const localNameLength = buffer.readUInt16LE(file.localOffset + 26);
     const localExtraLength = buffer.readUInt16LE(file.localOffset + 28);
     const dataStart = file.localOffset + 30 + localNameLength + localExtraLength;
     const raw = buffer.subarray(dataStart, dataStart + file.compressedSize);
+    if (file.method !== 0 && file.method !== 8) throw new Error(`unsupported ZIP method for ${file.name}`);
     const data = file.method === 0 ? raw : inflateRawSync(raw);
     if (file.uncompressedSize && data.length !== file.uncompressedSize)
       throw new Error(`size mismatch for ${file.name}: ${data.length} != ${file.uncompressedSize}`);
@@ -145,20 +158,13 @@ const zipPath = join(CACHE, ZIP_NAME);
 if (!(await exists(zipPath))) await download(`${BASE}/${ZIP_NAME}`, zipPath);
 else log(`reusing cached ${zipPath}`);
 
-let expected = "";
-try {
-  const response = await fetch(`${BASE}/${ZIP_NAME}.sha256`, { headers: { "user-agent": "rhine-lab-ui" } });
-  if (response.ok) expected = (await response.text()).trim().split(/\s+/)[0].toLowerCase();
-} catch {
-  /* the checksum file is optional; the size check below still applies */
-}
+const response = await fetch(`${BASE}/${ZIP_NAME}.sha256`, { headers: { "user-agent": "rhine-lab-ui" } });
+if (!response.ok) throw new Error(`official SHA256 unavailable: HTTP ${response.status}`);
+const expected = (await response.text()).trim().split(/\s+/)[0].toLowerCase();
+if (!/^[a-f0-9]{64}$/.test(expected)) throw new Error("official SHA256 unavailable or malformed");
 const actual = await sha256(zipPath);
-if (expected) {
-  if (expected !== actual) throw new Error(`SHA256 mismatch: expected ${expected}, got ${actual}`);
-  log(`SHA256 verified (${actual.slice(0, 16)}…)`);
-} else {
-  log(`SHA256 (upstream checksum unavailable): ${actual}`);
-}
+if (expected !== actual) throw new Error(`SHA256 mismatch: expected ${expected}, got ${actual}`);
+log(`SHA256 verified (${actual.slice(0, 16)}…)`);
 
 await rm(TARGET, { recursive: true, force: true });
 await mkdir(TARGET, { recursive: true });
@@ -171,12 +177,7 @@ await writeFile(
   `${VERSION} (${ARCH})\nSHA256 ${actual}\nlibvlc: ${libvlc.join(", ") || "missing"}\n`,
   "utf8",
 );
-await mkdir(dirname(POINTER), { recursive: true });
-await writeFile(
-  POINTER,
-  JSON.stringify({ exe: VLC_EXE, version: VERSION, arch: ARCH, sha256: actual, projectAscii: projectIsAscii }, null, 2),
-  "utf8",
-);
+await recordPointer(VERSION, actual);
 log(`installed VLC ${VERSION} (${ARCH}) → ${TARGET}`);
 log(`libvlc: ${libvlc.join(", ") || "missing"}`);
 if (!projectIsAscii)

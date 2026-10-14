@@ -39,9 +39,23 @@ export type BridgeHealth = {
   ready?: boolean;
   root: string;
   tracks: number;
+  playlist?: BridgePlaylist;
   scan: BridgeScan;
   vlc: { version: string; pid: number | null; startedAt: number };
 };
+
+export type BridgePlaylist = { root: string; part: number; total: number; parts: number; limit: number; split: boolean; needsSplit: boolean };
+export type BridgeCatalogue = { root: string; tracks: BridgeTrack[]; playlist: BridgePlaylist; scan?: BridgeScan; warning?: string };
+
+export class BridgeRequestError extends Error {
+  readonly status: number;
+  readonly payload: { error?: string; total?: number; parts?: number };
+  constructor(status: number, payload: { error?: string; total?: number; parts?: number }) {
+    super(`HTTP ${status}${payload.error ? `: ${payload.error}` : ""}`);
+    this.status = status;
+    this.payload = payload;
+  }
+}
 
 export type BridgeStatus = {
   state: "playing" | "paused" | "stopped" | "offline";
@@ -94,6 +108,7 @@ export class MusicBridge {
   private generation = 0;
   private controller = new AbortController();
   private connectionTask: Promise<BridgeHealth | null> | null = null;
+  private catalogueRevision = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private streamTimer: ReturnType<typeof setInterval> | null = null;
   private streamRecheckTimer: ReturnType<typeof setTimeout> | null = null;
@@ -158,13 +173,15 @@ export class MusicBridge {
     generation = this.generation,
     disconnectOnFailure = true,
     signal?: AbortSignal,
+    init?: RequestInit,
   ): Promise<T> {
     if (generation !== this.generation || this.disposed)
       throw new Error("桥接请求已失效");
     let response: Response;
     try {
       response = await fetch(this.base + path, {
-        headers: this.auth,
+        ...init,
+        headers: { ...this.auth, ...(init?.headers ?? {}) },
         signal: AbortSignal.any([
           this.controller.signal,
           AbortSignal.timeout(timeout),
@@ -186,7 +203,7 @@ export class MusicBridge {
     if (!response.ok) {
       const detail = payload && typeof payload === "object" && "error" in payload
         ? String(payload.error) : "";
-      throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+      throw new BridgeRequestError(response.status, { ...(payload as object), error: detail });
     }
     return payload;
   }
@@ -491,11 +508,35 @@ export class MusicBridge {
   }
 
   async library(): Promise<BridgeTrack[]> {
-    const payload = await this.request<{ tracks: BridgeTrack[]; root: string }>(
+    const revision = this.catalogueRevision;
+    const payload = await this.request<BridgeCatalogue>(
       "/api/library",
       20000,
     );
+    if (revision !== this.catalogueRevision) throw new Error("旧歌单请求已失效");
+    if (this.health) Object.assign(this.health, { root: payload.root, tracks: payload.tracks.length, ...(payload.playlist ? { playlist: payload.playlist } : {}) });
     return payload.tracks ?? [];
+  }
+
+  async switchPlaylist(root: string, part = 0, split = false): Promise<BridgeCatalogue> {
+    if (!this.connected) throw new Error("VLC 桥接未连接");
+    const generation = this.generation;
+    const sequence = this.beginTransport();
+    ++this.catalogueRevision;
+    try {
+      const payload = await this.request<BridgeCatalogue>("/api/playlist", 600000, generation, true, undefined, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ root, part, split }),
+      });
+      if (sequence !== this.transportSequence) throw new Error("歌单切换已失效");
+      this.outputMayRemain = false;
+      if (this.health) {
+        this.health = { ...this.health, root: payload.root, tracks: payload.tracks.length, playlist: payload.playlist, scan: payload.scan ?? this.health.scan };
+        this.options.onConnectionChange?.(true, this.health);
+      }
+      return payload;
+    } finally {
+      if (sequence === this.transportSequence) this.transportBusy = false;
+    }
   }
 
   /** Cover art for a bridge track, streamed from the bridge as an object URL. */
@@ -523,10 +564,13 @@ export class MusicBridge {
   }
 
   async rescan(full = false): Promise<BridgeScan | null> {
-    const payload = await this.request<{ scan: BridgeScan }>(
+    const revision = ++this.catalogueRevision;
+    const payload = await this.request<{ scan: BridgeScan; playlist?: BridgePlaylist }>(
       `/api/scan${full ? "?full=1" : ""}`,
       600000,
     );
+    if (revision !== this.catalogueRevision) throw new Error("旧歌单请求已失效");
+    if (this.health && payload.playlist) Object.assign(this.health, { playlist: payload.playlist });
     return payload.scan ?? null;
   }
 

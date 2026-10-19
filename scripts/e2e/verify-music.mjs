@@ -287,7 +287,8 @@ try {
       const r = (typeof target === 'string' ? modal.querySelector(target) : target).getBoundingClientRect();
       return { top:r.top, bottom:r.bottom, height:r.height };
     };
-    return { layout:document.querySelector('#stage').dataset.layout, searchHeight:parseFloat(getComputedStyle(search).height),
+    return { layout:document.querySelector('#stage').dataset.layout, viewportWidth:innerWidth, viewportHeight:innerHeight,
+      deviceRatio:devicePixelRatio, searchHeight:parseFloat(getComputedStyle(search).height),
       topPadding:parseFloat(getComputedStyle(modal).paddingTop),
       headingGap:rect('.search-field').top-rect('h2').bottom,
       header:rect('.result-header'), list:rect('#music-results'),
@@ -299,10 +300,15 @@ try {
       horizontalOverflow:list.scrollWidth-list.clientWidth };
   })()`, false, 30000);
   for (const [width, height] of [[1920,1080], [960,600], [390,844]]) {
-    await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor:1, mobile:false });
+    // Layout is measured in real CSS pixels. Reduce only this section's raster
+    // density so the 1080p software-rendered backdrop cannot starve CDP scroll
+    // commands. Clear the override before the playback and animation checks.
+    console.log(`panel layout: ${width}x${height} CSS pixels, DPR 0.25`);
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor:0.25, mobile:false });
     await sleep(700);
     const geometry = await panelLayout();
     check(`音乐面板 ${width}×${height}：紧凑搜索与表头、曲目、播放器互不遮挡`,
+      geometry.viewportWidth === width && geometry.viewportHeight === height && geometry.deviceRatio === 0.25 &&
       geometry.searchHeight >= 40 && geometry.searchHeight <= 48 && geometry.topPadding <= 30 &&
       geometry.layout === (width < 600 ? 'portrait' : width < 1100 ? 'compact' : 'desktop') &&
       geometry.headingGap >= 0 && geometry.headingGap <= 20 && geometry.header.bottom <= geometry.list.top+1 &&

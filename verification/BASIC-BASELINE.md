@@ -14,9 +14,12 @@
 | --- | --- |
 | 本机 `npm run check` | 2026-10-20 通过，退出码 0 |
 | 本机 `npm run build` | 2026-10-20 通过，退出码 0；构建指纹 `237403042a5ae293` |
-| 本机浏览器 / VLC 集成 | 本次未重跑，历史结果见上文 |
+| 本机浏览器集成 | 2026-10-20 通过，68/68；包含三种尺寸的真实布局、滚动与播放检查 |
+| 本机 VLC UI 集成 | 本次未重跑，历史结果见上文；本次远端另行验证 |
 | GitHub Actions | 此记录随基线首次提交；远端验收以该提交发布后的实际运行结果为准 |
 
 本次重新构建的 `dist/pwa-build.json` 与此前已验证构建的清单逐字相同（818 个文件），为当前源码与既有界面产物提供对应依据；它不替代本次远端集成测试。
+
+首次两轮远端运行（[39298128315](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/actions/runs/39298128315)、[39298523673](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/actions/runs/39298523673)）均通过基础检查、构建、VLC 获取校验与协议检查；浏览器在 1920×1080 布局断言通过后，滚动指令的 `Runtime.evaluate` 超时，VLC UI 随后跳过。为避免大尺寸软件渲染挤占布局检查，仅该测试段改用 DPR 0.25，CSS 视口和全部布局断言保留，产品源码与默认画质不变。修正效果以随后实际运行确认。
 
 本机日志保存在被忽略的 `.local/basic-baseline-20261020/`。可在 [basic 分支的 Actions 记录](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/actions/workflows/ci.yml?query=branch%3Abasic)中按本标签指向的提交核对本次运行。下载成功、上传工件成功以及测试实际执行通过分别确认；完整运行结论另记于基线发布说明。

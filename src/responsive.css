@@ -56,6 +56,7 @@
 :is([data-layout="compact"], [data-layout="portrait"]) .eyebrow { font-size: 9px; letter-spacing: .4px; margin-bottom: 12px; }
 :is([data-layout="compact"], [data-layout="portrait"]) .eyebrow > span { margin-left: 5px; }
 :is([data-layout="compact"], [data-layout="portrait"]) .file-title { font-size: 20px; gap: 6px; min-height: 44px; white-space: nowrap; }
+:is([data-layout="compact"], [data-layout="portrait"]) .archive-callout[data-kind="music"] .file-title { max-width: 100%; }
 :is([data-layout="compact"], [data-layout="portrait"]) .file-open { font-size: 20px; margin-left: auto; opacity: 1; }
 :is([data-layout="compact"], [data-layout="portrait"]) .callout-rule { margin: 8px 0 0 20px; }
 :is([data-layout="compact"], [data-layout="portrait"]) .callout-rule i { left: -20px; }
@@ -139,6 +140,16 @@
 :is([data-layout="compact"], [data-layout="portrait"]) .result-name > b { font-size: 12px; flex-basis: 48px; }
 :is([data-layout="compact"], [data-layout="portrait"]) .search-results { height: auto; overflow: visible; }
 :is([data-layout="compact"], [data-layout="portrait"]) .modal-bottom { position: static; margin-top: 22px; gap: 12px; font-size: 8px; flex-wrap: wrap; }
+:is([data-layout="compact"], [data-layout="portrait"]) .music-modal .modal-top { padding-bottom: 4px; }
+:is([data-layout="compact"], [data-layout="portrait"]) .music-modal h2 { margin: 12px 0 8px; }
+:is([data-layout="compact"], [data-layout="portrait"]) .music-panel .search-field { height: 44px; }
+:is([data-layout="compact"], [data-layout="portrait"]) .music-panel .music-filters { padding: 8px 0; }
+:is([data-layout="compact"], [data-layout="portrait"]) .music-panel :is(.result-header, .result-row) { grid-template-columns: minmax(0, 1fr) 100px; }
+:is([data-layout="compact"], [data-layout="portrait"]) .music-panel .search-results { overflow-y: auto; overflow-x: hidden; }
+[data-layout="portrait"] .music-panel :is(.result-header, .result-row) { grid-template-columns: minmax(0, 1fr) 68px; }
+[data-layout="portrait"] .music-bar { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+[data-layout="portrait"] :is(.music-now, .music-controls) { grid-column: 1 / -1; }
+[data-layout="portrait"] .music-volume input[type="range"] { width: 80px; }
 :is([data-layout="compact"], [data-layout="portrait"]) .audio-settings { grid-template-columns: 1fr; gap: 0; }
 :is([data-layout="compact"], [data-layout="portrait"]) .settings-list label { gap: 16px; }
 :is([data-layout="compact"], [data-layout="portrait"]) .motion-settings-head { align-items: flex-start; flex-wrap: wrap; gap: 8px; }

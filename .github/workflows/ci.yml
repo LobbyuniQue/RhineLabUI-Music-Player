@@ -2,7 +2,7 @@ name: Checks and build
 
 on:
   push:
-    branches: [main]
+    branches: [main, basic]
   pull_request:
   workflow_dispatch:
 

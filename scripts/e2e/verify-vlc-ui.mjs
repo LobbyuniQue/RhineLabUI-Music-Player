@@ -277,7 +277,7 @@ try {
     `[...document.querySelectorAll('#music-results .result-row')].map(row => row.dataset.musicTrack)`,
     false,
   );
-  const waitForPanelTrack = async (id) => {
+  const waitForPanelTrack = async (id, state) => {
     let current = null;
     let highlighted = "";
     const deadline = Date.now() + 45000;
@@ -296,7 +296,7 @@ try {
           20000,
         )
         .catch(() => "");
-      if (current?.currentId === id && highlighted === id) break;
+      if (current?.currentId === id && highlighted === (id ?? "") && (!state || current.state === state)) break;
     }
     return {
       currentId: current?.currentId ?? null,
@@ -348,6 +348,25 @@ try {
     mobile: false,
   });
   await sleep(1200);
+  await cdp.evaluate(`window.rhine.archive()`, false, 20000);
+  const layout = await cdp.evaluate(`(() => {
+    const modal = document.querySelector('.music-modal');
+    const list = document.querySelector('#music-results');
+    list.scrollTop = 0;
+    const rect = selector => {
+      const r = modal.querySelector(selector).getBoundingClientRect();
+      return { top:r.top, bottom:r.bottom, height:r.height };
+    };
+    return { searchHeight:parseFloat(getComputedStyle(modal.querySelector('.search-field')).height),
+      headingGap:rect('.search-field').top-rect('h2').bottom,
+      header:rect('.result-header'), list:rect('#music-results'), first:rect('#music-results .result-row'),
+      bar:rect('#music-bar'), footer:rect('.modal-bottom'), modalOverflow:modal.scrollHeight-modal.clientHeight };
+  })()`, false, 30000);
+  check('VLC 音乐面板：搜索紧凑，文件夹预设、表头、列表与播放器互不遮挡',
+    layout.searchHeight >= 40 && layout.searchHeight <= 48 && layout.headingGap >= 0 && layout.headingGap <= 20 &&
+    layout.header.bottom <= layout.list.top+1 && layout.header.bottom <= layout.first.top+1 &&
+    layout.list.bottom <= layout.bar.top+1 && layout.bar.bottom <= layout.footer.top+1 &&
+    layout.list.height > 40 && layout.modalOverflow <= 2, JSON.stringify(layout));
   const panelShot = await cdp.send("Page.captureScreenshot", { format: "png" });
   await writeFile(
     join(SHOTS, "music-panel-vlc.png"),
@@ -371,6 +390,46 @@ try {
     false,
     20000,
   );
+  await cdp.evaluate(`(() => {
+    const index=document.querySelector('.system-nav [data-action="search"]');
+    index.focus(); index.click();
+  })()`, false, 20000);
+  await sleep(700);
+  const unifiedPanel = await cdp.evaluate(`(() => {
+    const ids=[...document.querySelectorAll('#music-results .result-row')].map(row=>row.dataset.musicTrack);
+    const bridgeIds=window.rhine.music.library.tracks.filter(track=>track.bridge).map(track=>track.id);
+    return { count:document.querySelectorAll('.system-nav [data-action="search"]').length,
+      duplicate:document.querySelectorAll('.system-nav [data-action="music"]').length,
+      label:document.querySelector('#library-index-label').textContent, rows:ids.length,
+      realIds:ids.every(id=>bridgeIds.includes(id)), controls:!!document.querySelector('.music-controls'),
+      playId:window.rhine.music.library.tracks.find(track=>track.title.includes('Business Test Music'))?.id ?? ids[0],
+      focus:document.activeElement?.id, engine:document.querySelector('#music-engine-label')?.textContent };
+  })()`, false, 20000);
+  check("VLC 统一 MUSIC INDEX 入口打开真实曲目与播放控制", unifiedPanel.count === 1 && unifiedPanel.duplicate === 0 &&
+    unifiedPanel.label === "MUSIC INDEX" && unifiedPanel.rows === expected && unifiedPanel.realIds &&
+    unifiedPanel.controls && unifiedPanel.focus === "music-search" && /VLC 内核/.test(unifiedPanel.engine), JSON.stringify(unifiedPanel));
+  // Clicking the already playing row toggles pause. Start from a confirmed stop.
+  await cdp.evaluate(`window.rhine.music.bridgeStop()`, true, 60000);
+  const unifiedStopped = await waitForPanelTrack(null, "stopped");
+  if (unifiedStopped.currentId !== null || unifiedStopped.state !== "stopped")
+    throw new Error(`unified index playback setup did not stop VLC: ${JSON.stringify(unifiedStopped)}`);
+  await cdp.evaluate(`[...document.querySelectorAll('#music-results .result-row')].find(row=>row.dataset.musicTrack === ${JSON.stringify(unifiedPanel.playId)}).click()`, false, 20000);
+  const unifiedPlayback = await waitForPanelTrack(unifiedPanel.playId, "playing");
+  let unifiedIndicator;
+  const indicatorDeadline = Date.now() + 20000;
+  do {
+    unifiedIndicator = await cdp.evaluate(`({ text:document.querySelector('#music-nav-state').textContent,
+      visible:!document.querySelector('#music-nav-state').hidden,
+      playing:document.querySelector('.system-nav [data-action="search"]').classList.contains('playing') })`, false, 20000);
+    if (unifiedIndicator.text === "PLAYING" && unifiedIndicator.playing) break;
+    await sleep(300);
+  } while (Date.now() < indicatorDeadline);
+  check("统一检索面板的 VLC 播放控制及顶部播放状态正常", unifiedPlayback.currentId === unifiedPanel.playId &&
+    unifiedPlayback.highlighted === unifiedPanel.playId && unifiedPlayback.state === "playing" &&
+    unifiedIndicator.text === "PLAYING" && unifiedIndicator.visible && unifiedIndicator.playing,
+    JSON.stringify({ playback:unifiedPlayback, indicator:unifiedIndicator }));
+  await closeModal();
+  check("关闭 VLC 统一检索面板后焦点回到入口", await cdp.evaluate(`document.activeElement === document.querySelector('.system-nav [data-action="search"]')`, false, 20000));
   const archiveTarget = await cdp.evaluate(
     `(() => {
       const selected = document.querySelector('#file-ticks [aria-pressed="true"]');
@@ -388,6 +447,16 @@ try {
     throw new Error(
       `ambiguous selected music archive: ${JSON.stringify(archiveTarget)}`,
     );
+  const callout = await cdp.evaluate(`(() => {
+    const title = document.querySelector('#selected-song-title');
+    const artist = document.querySelector('#selected-title');
+    const track = window.rhine.music.library.tracks.find(track => track.id === ${JSON.stringify(archiveTarget.id)});
+    return { title:title.querySelector('.rn-value').textContent, artist:artist.querySelector('.rn-value').textContent,
+      expectedArtist:track.artist.trim() || '未知艺术家', tooltip:title.title,
+      visible:getComputedStyle(title).display !== 'none', idHidden:getComputedStyle(document.querySelector('#selected-id')).display === 'none' };
+  })()`, false, 20000);
+  check("VLC 音乐主标题显示歌名、副标题显示同一曲目歌手", callout.visible && callout.idHidden &&
+    callout.title === archiveTarget.title && callout.tooltip === archiveTarget.title && callout.artist === callout.expectedArtist, JSON.stringify(callout));
   await cdp.evaluate(`window.rhine.music.bridgeStop()`, true, 60000);
   let beforeArchive = null;
   for (let i = 0; i < 20; i++) {

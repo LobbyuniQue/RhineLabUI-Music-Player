@@ -369,6 +369,9 @@ button {
 .system-nav button:hover {
   color: #9b7247;
 }
+.system-nav [hidden] {
+  display: none;
+}
 .nav-glyph {
   width: 23px;
   height: 23px;
@@ -421,6 +424,32 @@ button {
   align-items: center;
   position: relative;
   letter-spacing: 0.2px;
+}
+#selected-song-title {
+  display: none;
+}
+:where([data-mode]:not([data-mode="boot"])) .archive-callout[data-kind="music"] :is(#file-title-label, #selected-id) {
+  display: none;
+}
+:where([data-mode]:not([data-mode="boot"])) .archive-callout[data-kind="music"] .file-title {
+  max-width: calc(100% - 58px);
+  text-align: left;
+}
+:where([data-mode]:not([data-mode="boot"])) .archive-callout[data-kind="music"] #selected-song-title {
+  display: inline-block;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.archive-callout[data-kind="music"] .file-open {
+  flex: none;
+}
+.archive-callout[data-kind="music"] #selected-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .file-open {
   font-size: 25px;
@@ -1639,7 +1668,7 @@ button {
 [data-boot="array"] .file-title {
   font-size: 24px;
 }
-[data-boot="array"][data-mode="boot"] .file-title span {
+[data-boot="array"][data-mode="boot"] .file-title > span:not(#file-title-label) {
   display: none;
 }
 [data-boot="array"] .callout-rule {
@@ -2120,6 +2149,7 @@ button {
 
 /* Use the same rolling engine as archive numbers, with quieter text blur. */
 #selected-title,
+#selected-song-title,
 #column-name,
 #hover-title,
 #archive-category,

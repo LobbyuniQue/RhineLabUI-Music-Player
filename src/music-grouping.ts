@@ -9,7 +9,7 @@ export type MusicGrouping = "album" | "artist" | "letter";
 export const MUSIC_GROUPINGS: [MusicGrouping, string][] = [
   ["album", "按专辑"],
   ["artist", "按歌手"],
-  ["letter", "按首字母"],
+  ["letter", "按歌名首字母"],
 ];
 
 const UNKNOWN_ALBUM = "未标记专辑";
@@ -47,7 +47,7 @@ export function nameInitial(name: string): string {
 function groupKey(track: LibraryTrack, grouping: MusicGrouping): string {
   if (grouping === "album") return track.album.trim() || UNKNOWN_ALBUM;
   if (grouping === "artist") return track.artist.trim() || UNKNOWN_ARTIST;
-  return nameInitial(track.artist.trim() || track.title.trim());
+  return nameInitial(track.title);
 }
 
 function compareTracks(grouping: MusicGrouping, a: LibraryTrack, b: LibraryTrack): number {
@@ -60,7 +60,7 @@ function compareTracks(grouping: MusicGrouping, a: LibraryTrack, b: LibraryTrack
     );
   }
   if (grouping === "letter") {
-    return collator.compare(a.artist, b.artist) || collator.compare(a.album, b.album) || (a.track ?? 0) - (b.track ?? 0) || collator.compare(a.title, b.title);
+    return collator.compare(a.title, b.title) || collator.compare(a.artist, b.artist) || collator.compare(a.album, b.album) || (a.track ?? 0) - (b.track ?? 0);
   }
   return (a.disc ?? 0) - (b.disc ?? 0) || (a.track ?? 0) - (b.track ?? 0) || collator.compare(a.title, b.title);
 }

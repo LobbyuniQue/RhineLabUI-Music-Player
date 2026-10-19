@@ -80,9 +80,8 @@ $("#stage").innerHTML = `
   <div id="boot-background" class="boot-background"><svg viewBox="0 0 1920 1080" preserveAspectRatio="none"><g fill="none" stroke="#fff" stroke-width="3"><path d="M-210 705C-45 705 182 704 247 567C337 377 99 306 4 435S27 680 169 631C309 584 227 314 279 111S568-113 568-113"/><path d="M1560-80C1374 114 1671 168 1601 323S1371 367 1431 480S1692 666 1559 787S1329 886 1498 1130"/><circle cx="1450" cy="648" r="346"/><circle cx="1450" cy="648" r="348"/></g></svg></div>
   <header class="brand">${brandHeading}</header>
   <nav class="system-nav" aria-label="系统导航">
-    <button data-action="search"><span class="nav-glyph">⌕</span> ARCHIVE INDEX <span class="key">/</span></button>
+    <button data-action="search" aria-label="档案检索" title="档案检索（/）"><span class="nav-glyph">⌕</span> <span id="library-index-label">ARCHIVE INDEX</span> <span class="key">/</span><span class="key" id="music-nav-state" hidden>OFF</span></button>
     <button data-action="library-mode" aria-label="切换档案库或音乐库" title="档案库 / 音乐库"><span class="nav-glyph">▦</span> <span id="library-mode-label">ARCHIVE 档案库</span></button>
-    <button data-action="music" aria-label="本地音乐" title="本地音乐"><span class="nav-glyph">♪</span> LOCAL MUSIC <span class="key" id="music-nav-state">OFF</span></button>
     <button data-action="saved" aria-label="查看收藏档案" title="收藏档案">＋ SAVED <span id="saved-count">00</span></button>
     <button class="settings-button" data-action="settings" aria-label="系统设置" title="系统设置"><span class="settings-glyph" aria-hidden="true">◷</span><span class="settings-label">设置</span></button>
   </nav>
@@ -97,7 +96,7 @@ $("#stage").innerHTML = `
   <svg id="inspection-marks" viewBox="0 0 1920 1080" aria-hidden="true"><path id="inspection-lines"/><g id="inspection-corners"></g><circle id="inspection-point" r="1.8"/></svg>
   <div id="inspection-text" aria-hidden="true">CONFIDENTIALITY:<strong>GENERAL BUSINESS USE</strong></div>
   <section id="archive-ui" class="archive-ui" aria-label="档案选择">
-    <div class="archive-callout"><div class="eyebrow">INTERNAL DATABASE <span>／</span> <span id="archive-category">机构档案</span></div><button class="file-title" data-action="open">FILE NUMBER: <span id="selected-id"><span id="selected-prefix">X-</span><span id="selected-code">001</span></span><span class="file-open">↗</span></button><div class="callout-rule"><i></i></div><div class="file-summary"><span id="selected-title">莱茵生命</span><span id="selected-clearance">BUSINESS AREA</span></div><button class="read-file" data-action="open">ACCESS FILE <span>→</span></button></div>
+    <div class="archive-callout"><div class="eyebrow">INTERNAL DATABASE <span>／</span> <span id="archive-category">机构档案</span></div><button class="file-title" data-action="open"><span id="file-title-label">FILE NUMBER: </span><span id="selected-id"><span id="selected-prefix">X-</span><span id="selected-code">001</span></span><span id="selected-song-title"></span><span class="file-open">↗</span></button><div class="callout-rule"><i></i></div><div class="file-summary"><span id="selected-title">莱茵生命</span><span id="selected-clearance">BUSINESS AREA</span></div><button class="read-file" data-action="open">ACCESS FILE <span>→</span></button></div>
     <div id="hover-label" class="hover-label" hidden><span id="hover-prefix">X-</span><span id="hover-code">001</span> / <span id="hover-title"></span></div>
     <div class="archive-counter"><span class="tiny-label">ARCHIVE / SELECT</span><div><span id="selected-number">01</span><i>/</i><span class="count-total">12</span></div></div>
     <div class="archive-navigation"><button data-action="prev" aria-label="上一个档案">↑</button><div id="file-ticks" class="file-ticks"></div><button data-action="next" aria-label="下一个档案">↓</button></div>
@@ -286,6 +285,7 @@ const selectionTitle = createRollingText($("#selected-title"), {
   ...textOptions,
   text: $("#selected-title").textContent ?? "",
 });
+const songTitle = createRollingText($("#selected-song-title"), { ...textOptions, text: "" });
 const columnTitle = createRollingText($("#column-name"), {
   ...textOptions,
   text: $("#column-name").textContent ?? "",
@@ -299,7 +299,7 @@ const clearanceTitle = createRollingText($("#selected-clearance"), {
   ...textOptions,
   text: $("#selected-clearance").textContent ?? "",
 });
-const rollingTitles = [selectionTitle, columnTitle, hoverTitle, categoryTitle, clearanceTitle];
+const rollingTitles = [selectionTitle, songTitle, columnTitle, hoverTitle, categoryTitle, clearanceTitle];
 const selectedCode = createRollingNumber($("#selected-code"), codeOptions);
 const hoverCode = createRollingNumber($("#hover-code"), codeOptions);
 const audio = new TerminalAudio();
@@ -742,9 +742,15 @@ function onLibraryMayHaveChanged() {
 }
 function syncLibraryModeUI() {
   const music = activeView().kind === "music";
+  $("#library-index-label").textContent = music ? "MUSIC INDEX" : "ARCHIVE INDEX";
+  const index = $<HTMLButtonElement>('[data-action="search"]');
+  index.setAttribute("aria-label", music ? "音乐库检索与播放" : "档案检索");
+  index.title = music ? "音乐库检索与播放（/）" : "档案检索（/）";
+  $("#music-nav-state").hidden = !music;
   $("#library-mode-label").textContent = music ? "MUSIC 音乐库" : "ARCHIVE 档案库";
   $<HTMLButtonElement>('[data-action="library-mode"]').setAttribute("aria-pressed", String(music));
   $<HTMLButtonElement>('[data-action="saved"]').toggleAttribute("hidden", music);
+  syncMusicIndicators();
 }
 const musicHost = {
   library: musicLibrary,
@@ -795,7 +801,7 @@ function syncMusicIndicators() {
   const id = prefs.musicEngine === "vlc" ? bridgeStatus?.currentId : state.id;
   const node = document.querySelector("#music-nav-state");
   if (node) node.textContent = playing ? "PLAYING" : id ? "PAUSED" : "OFF";
-  document.querySelector('[data-action="music"]')?.classList.toggle("playing", playing);
+  document.querySelector('[data-action="search"]')?.classList.toggle("playing", activeView().kind === "music" && playing);
   syncSystemMedia();
 }
 
@@ -1079,6 +1085,7 @@ function setMode(next: Mode) {
     configureAudio();
   }
   $("#stage").dataset.mode = next;
+  if (previousMode !== next && (previousMode === "boot" || next === "boot")) updateSelection();
   workbench?.syncVisibility();
   if (previousMode !== next) fit();
   $("#boot").inert = next !== "boot";
@@ -1099,7 +1106,7 @@ function setMode(next: Mode) {
   scene?.setMode(next === "boot" ? "hidden" : next);
   if (next !== "boot") {
     bootSequence.reset();
-    $(".file-title").firstChild!.textContent = "FILE NUMBER: ";
+    $("#file-title-label").textContent = "FILE NUMBER: ";
     $("#stage").dataset.boot = "done";
   }
   if (next === "detail" && previousMode !== "detail") {
@@ -1143,8 +1150,13 @@ function updateSelection(navigation?: ArchiveNavigation) {
   const { lane } = v.fileLocation(selected);
   const files = v.columnFiles(lane);
   refreshFileTicks();
+  const music = v.kind === "music" && mode !== "boot";
+  $(".archive-callout").dataset.kind = v.kind;
   $("#selected-prefix").textContent = r.id.slice(0, 2);
-  selectionTitle.update({ text: r.title, animated: motionActive("rollingText") && mode === "archive" });
+  songTitle.update({ text: music ? r.title : "", animated: motionActive("rollingText") && mode === "archive" });
+  $("#selected-song-title").title = music ? r.title : "";
+  selectionTitle.update({ text: music ? r.en : r.title, animated: motionActive("rollingText") && mode === "archive" });
+  $("#selected-title").title = music ? r.en : r.title;
   clearanceTitle.update({ text: r.clearance, animated: motionActive("rollingText") && mode === "archive" });
   categoryTitle.update({ text: r.category, animated: motionActive("rollingText") && mode === "archive" });
   const direction =
@@ -1432,6 +1444,7 @@ function notify(message: string) {
 
 function openModal(kind: NonNullable<typeof modal>) {
   if (!ready) return;
+  if (kind === "search" && view().kind === "music") kind = "music";
   if (musicReveal.pending || musicReveal.holding) void cancelMusicArchive();
   if (!modal) {
     previousFocus = document.activeElement as HTMLElement;
@@ -1928,7 +1941,7 @@ function bootFrame(t: number) {
     $("#stage").dataset.boot = step;
     lastStep = step;
   }
-  $(".file-title").firstChild!.textContent =
+  $("#file-title-label").textContent =
     step === "array"
       ? "SELECTING FILES...".slice(0, Math.max(0, Math.floor((t - 21.94) * 18)))
       : "FILE NUMBER: ";

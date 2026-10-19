@@ -98,13 +98,13 @@ export function musicSettingsMarkup(library: MusicLibrary, state: MusicSettingsS
   </div>
   <div class="music-settings-item">
     <strong>ARCHIVE GROUPING</strong>
-    <span>音乐库档案阵列 · 每一列为同一专辑、同一歌手或同一首字母</span>
+    <span>音乐库档案阵列 · 每一列为同一专辑、同一歌手或同一歌名首字母</span>
     <div class="music-settings-rhythm" role="group" aria-label="排列方式">
       ${(
         [
           ["album", "按专辑"],
           ["artist", "按歌手"],
-          ["letter", "按首字母"],
+          ["letter", "按歌名首字母"],
         ] as const
       )
         .map(

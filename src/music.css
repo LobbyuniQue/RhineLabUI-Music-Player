@@ -10,28 +10,40 @@
 .music-modal {
   display: flex;
   flex-direction: column;
+  padding: 24px 53px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.music-modal .modal-top {
+  padding-bottom: 12px;
+}
+
+.music-modal h2 {
+  margin: 20px 0 12px;
 }
 
 .music-panel {
   display: grid;
-  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
+  /* Search, filters, presets, status, header, scrollable songs, player, footer. */
+  grid-template-rows: auto auto auto auto auto minmax(76px, 1fr) auto auto;
   flex: 1 1 auto;
   height: auto;
   min-height: 0;
-  margin-top: 6px;
-  /* The modal bottom is absolutely positioned by the shared shell. */
-  padding-bottom: 34px;
+  margin-top: 0;
   color: var(--theme-ink, #080a08);
 }
 
 .music-panel .search-field {
-  margin-top: 12px;
+  height: 44px;
+  margin-top: 0;
 }
 
 /* Category filters carry the retrieval scope; the directory actions sit at the
    far end of the same row so the modal keeps a single control line. */
 .music-filters {
   align-items: center;
+  padding: 12px 0 10px;
 }
 
 .music-tools {
@@ -100,10 +112,25 @@
   grid-template-columns: minmax(0, 1fr) 118px 132px;
 }
 
+.music-panel .result-header {
+  padding-block: 10px;
+  position: relative;
+  z-index: 1;
+  background: var(--theme-panel, #edebe4);
+}
+
 /* The archive index fixes its list height; the music panel fills the grid. */
 .music-panel .search-results {
   height: auto;
   min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+.music-modal .music-panel > .modal-bottom {
+  position: static;
+  margin-top: 16px;
 }
 
 .music-panel .result-row.cursor {
@@ -139,6 +166,8 @@
   grid-template-columns: minmax(0, 1.4fr) auto minmax(0, 1.1fr) auto;
   align-items: center;
   gap: 18px;
+  border-top: 1px solid var(--theme-line, #b4b0a5);
+  padding-top: 12px;
 }
 
 .music-now {
@@ -525,16 +554,5 @@
   .music-seek::after,
   .music-filters button {
     transition: none;
-  }
-}
-
-/* Short viewports: tighten the search block so the list keeps its room. */
-@media (max-height: 820px) {
-  .music-panel .search-field {
-    margin-top: 4px;
-  }
-
-  .music-filters {
-    padding: 16px 0 14px;
   }
 }

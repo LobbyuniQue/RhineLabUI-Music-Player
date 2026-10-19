@@ -148,6 +148,24 @@ try {
 
   check("应用就绪（review 模式）", await load());
 
+  const closeIndex = async () => {
+    const closed = await cdp.evaluate(`new Promise(resolve => {
+      document.querySelector('[data-action="close-modal"]')?.click();
+      const started = performance.now();
+      const poll = () => {
+        if (!document.querySelector('#modal-root [role="dialog"]') && !document.querySelector('.system-nav').inert) return resolve(true);
+        if (performance.now() - started > 15000) return resolve(false);
+        setTimeout(poll, 100);
+      }; poll();
+    })`, true, 20000);
+    if (!closed) throw new Error("Index closing animation did not release navigation");
+  };
+  const pressIndexShortcut = async () => {
+    await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "/", code: "Slash", text: "/" });
+    await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "/", code: "Slash" });
+    await sleep(700);
+  };
+
   // One helper in page scope, then one fetch per call: a single evaluate with
   // four fetches starves under software rendering.
   await cdp.evaluate(
@@ -258,6 +276,68 @@ try {
     `${panel.rows} rows · ${panel.status}`,
   );
   check("检索框自动获得焦点", panel.focus === "music-search", panel.focus);
+
+  const layoutMode = await cdp.evaluate(`window.rhine.stats().mode`, false, 20000);
+  await cdp.evaluate(`window.rhine.archive()`, false, 20000);
+  const panelLayout = () => cdp.evaluate(`(() => {
+    const modal = document.querySelector('.music-modal');
+    const search = modal.querySelector('.search-field');
+    const list = document.querySelector('#music-results');
+    const rect = target => {
+      const r = (typeof target === 'string' ? modal.querySelector(target) : target).getBoundingClientRect();
+      return { top:r.top, bottom:r.bottom, height:r.height };
+    };
+    return { layout:document.querySelector('#stage').dataset.layout, searchHeight:parseFloat(getComputedStyle(search).height),
+      topPadding:parseFloat(getComputedStyle(modal).paddingTop),
+      headingGap:rect('.search-field').top-rect('h2').bottom,
+      header:rect('.result-header'), list:rect('#music-results'),
+      first:rect('#music-results .result-row'), last:rect([...list.querySelectorAll('.result-row')].at(-1)),
+      bar:rect('#music-bar'), footer:rect('.modal-bottom'),
+      listScroll:list.scrollTop, listOverflow:list.scrollHeight-list.clientHeight,
+      modalOverflow:modal.scrollHeight-modal.clientHeight,
+      modalHorizontalOverflow:modal.scrollWidth-modal.clientWidth,
+      horizontalOverflow:list.scrollWidth-list.clientWidth };
+  })()`, false, 30000);
+  for (const [width, height] of [[1920,1080], [960,600], [390,844]]) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor:1, mobile:false });
+    await sleep(700);
+    const geometry = await panelLayout();
+    check(`音乐面板 ${width}×${height}：紧凑搜索与表头、曲目、播放器互不遮挡`,
+      geometry.searchHeight >= 40 && geometry.searchHeight <= 48 && geometry.topPadding <= 30 &&
+      geometry.layout === (width < 600 ? 'portrait' : width < 1100 ? 'compact' : 'desktop') &&
+      geometry.headingGap >= 0 && geometry.headingGap <= 20 && geometry.header.bottom <= geometry.list.top+1 &&
+      geometry.header.bottom <= geometry.first.top+1 && geometry.list.bottom <= geometry.bar.top+1 &&
+      geometry.bar.bottom <= geometry.footer.top+1 && geometry.list.height > 40 &&
+      (width < 600 || geometry.modalOverflow <= 2) && geometry.modalHorizontalOverflow <= 2 &&
+      geometry.horizontalOverflow <= 2, JSON.stringify(geometry));
+    await cdp.evaluate(`document.querySelector('#music-results').scrollTop = document.querySelector('#music-results').scrollHeight`, false, 20000);
+    const scrolled = await panelLayout();
+    check(`音乐面板 ${width}×${height}：曲目区域独立滚动、固定表头与播放器、末首可见`,
+      Math.abs(scrolled.header.top-geometry.header.top) <= 1 && Math.abs(scrolled.bar.top-geometry.bar.top) <= 1 &&
+      scrolled.last.top >= scrolled.list.top-1 && scrolled.last.bottom <= scrolled.list.bottom+1 &&
+      (geometry.listOverflow <= 2 || scrolled.listScroll > 0), JSON.stringify(scrolled));
+    if (width < 600) {
+      const bottom = await cdp.evaluate(`(() => {
+        const modal = document.querySelector('.music-modal');
+        modal.scrollTop = modal.scrollHeight;
+        const box = modal.getBoundingClientRect();
+        const bar = document.querySelector('#music-bar').getBoundingClientRect();
+        const footer = modal.querySelector('.modal-bottom').getBoundingClientRect();
+        return { modalBottom:box.bottom, barTop:bar.top, barBottom:bar.bottom, footerBottom:footer.bottom,
+          viewportHeight:innerHeight, horizontalOverflow:modal.scrollWidth-modal.clientWidth };
+      })()`, false, 20000);
+      check('音乐面板窄视口：播放器与页脚滚动可达、无需横向滚动',
+        bottom.barTop >= 0 && bottom.barBottom <= bottom.modalBottom+1 && bottom.footerBottom <= bottom.modalBottom+1 &&
+        bottom.footerBottom <= bottom.viewportHeight+1 && bottom.horizontalOverflow <= 2, JSON.stringify(bottom));
+    }
+    const layoutShot = await cdp.send('Page.captureScreenshot', { format:'png' });
+    await writeFile(join(SHOTS, `music-panel-layout-${width}x${height}.png`), Buffer.from(layoutShot.data,'base64'));
+    await cdp.evaluate(`document.querySelector('#music-results').scrollTop = 0`, false, 20000);
+    await cdp.evaluate(`document.querySelector('.music-modal').scrollTop = 0`, false, 20000);
+  }
+  await cdp.send('Emulation.clearDeviceMetricsOverride');
+  // Preserve the opening's low render load for the existing short-tone checks.
+  if (layoutMode === 'boot') await cdp.evaluate(`window.rhine.seek(0)`, false, 20000);
 
   const keyboard = await cdp.evaluate(
     `(() => {
@@ -530,10 +610,54 @@ try {
     JSON.stringify({ ...musicMode, expected: expectedAlbumColumns }),
   );
   const archiveTarget = await cdp.evaluate(
-    `(() => { const tick = document.querySelector('#file-ticks [aria-pressed="true"]'); const title = (tick?.title ?? '').replace(/^M-\\d+\\s*·\\s*/, '').trim() || document.querySelector('#selected-title')?.textContent?.trim() || ''; const track = window.rhine.music.library.tracks.find(t => t.title === title); return { id: track?.id ?? '', title: track?.title ?? '', artist: track?.artist?.trim() || '未知艺术家' }; })()`,
+    `(() => { const tick = document.querySelector('#file-ticks [aria-pressed="true"]'); const title = (tick?.title ?? '').replace(/^M-\\d+\\s*·\\s*/, '').trim() || document.querySelector('#selected-song-title .rn-value')?.textContent?.trim() || ''; const track = window.rhine.music.library.tracks.find(t => t.title === title); return { id: track?.id ?? '', title: track?.title ?? '', artist: track?.artist?.trim() || '未知艺术家' }; })()`,
     false,
     20000,
   );
+  await cdp.evaluate(`window.rhine.archive()`, false, 20000);
+  const callout = await cdp.evaluate(`(() => {
+    const title = document.querySelector('#selected-song-title');
+    const artist = document.querySelector('#selected-title');
+    return { title:title.querySelector('.rn-value').textContent, artist:artist.querySelector('.rn-value').textContent,
+      visible:getComputedStyle(title).display !== 'none', idHidden:getComputedStyle(document.querySelector('#selected-id')).display === 'none',
+      tooltip:title.title };
+  })()`, false, 20000);
+  check("音乐主标题显示歌名、副标题显示歌手", callout.visible && callout.idHidden &&
+    callout.title === archiveTarget.title && callout.tooltip === archiveTarget.title && callout.artist === archiveTarget.artist, JSON.stringify(callout));
+
+  const musicIndex = await cdp.evaluate(`(() => {
+    const index = document.querySelector('.system-nav [data-action="search"]');
+    const status = document.querySelector('#music-nav-state');
+    return { count:document.querySelectorAll('.system-nav [data-action="search"]').length,
+      duplicate:document.querySelectorAll('.system-nav [data-action="music"]').length,
+      label:document.querySelector('#library-index-label').textContent,
+      accessible:index.getAttribute('aria-label'), statusEnabled:!status.hidden };
+  })()`, false, 20000);
+  check("顶部只保留一个检索入口并随音乐库显示 MUSIC INDEX", musicIndex.count === 1 && musicIndex.duplicate === 0 &&
+    musicIndex.label === "MUSIC INDEX" && /音乐/.test(musicIndex.accessible) && musicIndex.statusEnabled, JSON.stringify(musicIndex));
+  await cdp.evaluate(`(() => { const index=document.querySelector('.system-nav [data-action="search"]'); index.focus(); index.click(); })()`, false, 20000);
+  await sleep(700);
+  const indexPanel = await cdp.evaluate(`({ rows:document.querySelectorAll('#music-results .result-row').length,
+    controls:!!document.querySelector('.music-controls'), archiveInput:!!document.querySelector('#archive-search'),
+    focus:document.activeElement?.id })`, false, 20000);
+  check("音乐库检索入口打开含歌曲与播放控制的音乐面板", indexPanel.rows === N && indexPanel.controls &&
+    !indexPanel.archiveInput && indexPanel.focus === "music-search", JSON.stringify(indexPanel));
+  await closeIndex();
+  const musicFocus = await cdp.evaluate(`document.activeElement === document.querySelector('.system-nav [data-action="search"]')`, false, 20000);
+  check("关闭音乐检索后焦点返回统一入口", musicFocus);
+  await pressIndexShortcut();
+  const musicShortcut = await cdp.evaluate(`({ music:!!document.querySelector('#music-search'),
+    controls:!!document.querySelector('.music-controls'), focus:document.activeElement?.id })`, false, 20000);
+  check("音乐库下 / 快捷键打开同一音乐检索面板", musicShortcut.music && musicShortcut.controls &&
+    musicShortcut.focus === "music-search", JSON.stringify(musicShortcut));
+  await closeIndex();
+  await cdp.evaluate(`window.rhine.music.player.setMode("single")`, false, 20000);
+  await playAndWait(idOf("02 测试正弦 440Hz.wav"), "检索入口播放指示");
+  const indexPlaying = await cdp.evaluate(`({ text:document.querySelector('#music-nav-state').textContent,
+    visible:!document.querySelector('#music-nav-state').hidden,
+    playing:document.querySelector('.system-nav [data-action="search"]').classList.contains('playing') })`, false, 20000);
+  check("音乐播放状态显示在统一检索入口", indexPlaying.text === "PLAYING" && indexPlaying.visible && indexPlaying.playing, JSON.stringify(indexPlaying));
+
   await cdp.evaluate(`(() => {
     const music = window.rhine.music;
     music.player.stop();
@@ -728,6 +852,15 @@ try {
     mobile: false,
   });
   await sleep(1500);
+  const calloutBounds = await cdp.evaluate(`(() => {
+    const title = document.querySelector('#selected-song-title');
+    const box = document.querySelector('.archive-callout').getBoundingClientRect();
+    const bounds = title.getBoundingClientRect();
+    return { title:title.querySelector('.rn-value').textContent, tooltip:title.title,
+      width:bounds.width, contained:bounds.right <= box.right + 1 && bounds.left >= box.left - 1 };
+  })()`, false, 20000);
+  check("窄屏音乐主标题受可用宽度约束并保留完整名称", calloutBounds.width > 0 &&
+    calloutBounds.contained && calloutBounds.tooltip === calloutBounds.title, JSON.stringify(calloutBounds));
   const modeShot = await cdp.send("Page.captureScreenshot", { format: "png" });
   await writeFile(
     join(SHOTS, "music-archive-mode.png"),
@@ -834,6 +967,42 @@ try {
       artistMode.selected.startsWith("M-"),
     JSON.stringify(artistMode),
   );
+  await cdp.evaluate(`document.querySelector('[data-music-grouping="letter"]').click()`, false, 20000);
+  const letterMode = await cdp.evaluate(`(() => {
+    const text = selector => document.querySelector(selector + ' .rn-value')?.textContent ?? '';
+    return { grouping:window.rhine.stats().grouping, title:text('#selected-song-title'), artist:text('#selected-title'),
+      column:text('#column-name'), label:document.querySelector('[data-music-grouping="letter"]').textContent.trim() };
+  })()`, false, 20000);
+  check("歌名首字母分组：Business Test Music 归 B、歌手 Rhine Lab 不影响分组",
+    letterMode.grouping === "letter" && letterMode.title === "Business Test Music" &&
+    letterMode.artist === FIXTURE_ARTIST && letterMode.column === "B" && letterMode.label === "按歌名首字母", JSON.stringify(letterMode));
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width:960, height:600, deviceScaleFactor:1, mobile:false });
+  await cdp.evaluate(`(() => {
+    const track = window.rhine.music.library.tracks.find(track => track.id === ${JSON.stringify(archiveTarget.id)});
+    window.__calloutSample = { track, title:track.title, artist:track.artist };
+    track.title = '一颗方糖悬滞的时间 Long Song Title '.repeat(8);
+    track.artist = '';
+    document.querySelector('[data-music-grouping="artist"]').click();
+  })()`, false, 20000);
+  await sleep(900);
+  const longCallout = await cdp.evaluate(`(() => {
+    const title = document.querySelector('#selected-song-title');
+    const artist = document.querySelector('#selected-title .rn-value').textContent;
+    const box = document.querySelector('.archive-callout').getBoundingClientRect();
+    const bounds = title.getBoundingClientRect();
+    return { full:title.querySelector('.rn-value').textContent === window.__calloutSample.track.title,
+      tooltip:title.title === window.__calloutSample.track.title, artist,
+      contained:bounds.right <= box.right + 1 && bounds.left >= box.left - 1, width:bounds.width };
+  })()`, false, 20000);
+  check("长中英文歌名保持完整语义且不越界，缺少歌手显示未知艺术家",
+    longCallout.full && longCallout.tooltip && longCallout.contained && longCallout.width > 0 &&
+    longCallout.artist === "未知艺术家", JSON.stringify(longCallout));
+  await cdp.evaluate(`(() => {
+    Object.assign(window.__calloutSample.track, { title:window.__calloutSample.title, artist:window.__calloutSample.artist });
+    delete window.__calloutSample;
+    document.querySelector('[data-music-grouping="letter"]').click();
+  })()`, false, 20000);
+  await cdp.send("Emulation.clearDeviceMetricsOverride");
   await cdp.evaluate(
     `document.querySelector('[data-action="close-modal"]').click()`,
     false,
@@ -870,6 +1039,41 @@ try {
       archiveMode.coverVisible === false,
     JSON.stringify(archiveMode),
   );
+  const restoredCallout = await cdp.evaluate(`(() => {
+    const text = document.querySelector('#selected-title .rn-value').textContent;
+    const label = document.querySelector('#file-ticks [aria-pressed="true"]').title;
+    return { text, label, prefix:document.querySelector('#file-title-label').textContent.trim(),
+      idVisible:getComputedStyle(document.querySelector('#selected-id')).display !== 'none',
+      songHidden:getComputedStyle(document.querySelector('#selected-song-title')).display === 'none' };
+  })()`, false, 20000);
+  check("普通档案恢复文件编号与原档案标题", restoredCallout.idVisible && restoredCallout.songHidden &&
+    restoredCallout.prefix === "FILE NUMBER:" && restoredCallout.label.endsWith(restoredCallout.text), JSON.stringify(restoredCallout));
+
+  const archiveIndex = await cdp.evaluate(`(() => {
+    const index=document.querySelector('.system-nav [data-action="search"]');
+    const status=document.querySelector('#music-nav-state');
+    index.focus();
+    return { label:document.querySelector('#library-index-label').textContent,
+      accessible:index.getAttribute('aria-label'), statusHidden:status.hidden && getComputedStyle(status).display === 'none',
+      playing:index.classList.contains('playing') };
+  })()`, false, 20000);
+  check("切回档案库时统一入口恢复 ARCHIVE INDEX 并隐藏播放状态", archiveIndex.label === "ARCHIVE INDEX" &&
+    archiveIndex.accessible === "档案检索" && archiveIndex.statusHidden && !archiveIndex.playing, JSON.stringify(archiveIndex));
+  await cdp.evaluate(`document.querySelector('.system-nav [data-action="search"]').click()`, false, 20000);
+  await sleep(700);
+  const archiveIndexPanel = await cdp.evaluate(`({ archive:!!document.querySelector('#archive-search'),
+    music:!!document.querySelector('#music-search'), rows:document.querySelectorAll('#search-results .result-row').length,
+    focus:document.activeElement?.id })`, false, 20000);
+  check("档案库检索入口恢复档案检索内容", archiveIndexPanel.archive && !archiveIndexPanel.music &&
+    archiveIndexPanel.rows > 0 && archiveIndexPanel.focus === "archive-search", JSON.stringify(archiveIndexPanel));
+  await closeIndex();
+  check("关闭档案检索后焦点返回统一入口", await cdp.evaluate(`document.activeElement === document.querySelector('.system-nav [data-action="search"]')`, false, 20000));
+  await pressIndexShortcut();
+  const archiveShortcut = await cdp.evaluate(`({ archive:!!document.querySelector('#archive-search'),
+    music:!!document.querySelector('#music-search'), focus:document.activeElement?.id })`, false, 20000);
+  check("档案库下 / 快捷键打开原档案检索", archiveShortcut.archive && !archiveShortcut.music &&
+    archiveShortcut.focus === "archive-search", JSON.stringify(archiveShortcut));
+  await closeIndex();
 
   await cdp.evaluate(
     `(() => { window.rhine.music.player.stop(); return true; })()`,
@@ -1013,6 +1217,24 @@ try {
     if (splitState.count === 1000 && splitState.options === 3 && !splitState.busy) break;
   }
   check("自动拆分只加载首卷 1000 首并建立两卷", splitState.count === 1000 && splitState.options === 3 && !splitState.busy, JSON.stringify(splitState));
+  const thousandBefore = await panelLayout();
+  const thousandRows = await cdp.evaluate(`(() => {
+    for (let page=0; page<4; page++) document.querySelector('#music-results [data-music="more"]')?.click();
+    const list = document.querySelector('#music-results');
+    list.scrollTop = list.scrollHeight;
+    const last = [...list.querySelectorAll('.result-row')].at(-1);
+    return { rows:list.querySelectorAll('.result-row').length, index:last.dataset.musicIndex,
+      realId:last.dataset.musicTrack === window.rhine.music.library.tracks[999].id };
+  })()`, false, 30000);
+  const thousandAfter = await panelLayout();
+  check("千首歌单分批展开后可滚动到末首，表头与播放器保持可见",
+    thousandRows.rows === 1000 && thousandRows.index === '999' && thousandRows.realId && thousandAfter.listScroll > 0 &&
+    Math.abs(thousandAfter.header.top-thousandBefore.header.top) <= 1 && Math.abs(thousandAfter.bar.top-thousandBefore.bar.top) <= 1 &&
+    thousandAfter.last.top >= thousandAfter.list.top-1 && thousandAfter.last.bottom <= thousandAfter.list.bottom+1 &&
+    thousandAfter.list.bottom <= thousandAfter.bar.top+1 && thousandAfter.bar.bottom <= thousandAfter.footer.top+1,
+    JSON.stringify({ ...thousandRows, geometry:thousandAfter }));
+  const thousandShot = await cdp.send('Page.captureScreenshot', { format:'png' });
+  await writeFile(join(SHOTS, 'music-panel-last-track.png'), Buffer.from(thousandShot.data,'base64'));
   await cdp.evaluate(`(() => { const select=document.querySelector('#music-playlist'); select.value=select.options[2].value; select.dispatchEvent(new Event('change',{bubbles:true})); })()`, false);
   let volumeState;
   for (let i=0;i<20;i++) {

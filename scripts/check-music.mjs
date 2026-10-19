@@ -389,8 +389,25 @@ const artistView = buildMusicView(lib, 'artist');
 assert.deepEqual([...artistView.columns], ['Alpha', 'Beta', '未知艺术家']);
 assert.deepEqual(artistView.columnFiles(0).map(i => artistView.records[i].department), ['未标记专辑', 'Delta'], 'artist members ordered by album');
 const letterView = buildMusicView(lib, 'letter');
-assert.deepEqual([...letterView.columns], ['A', 'B', 'E']);
-assert.equal(letterView.columnFiles(2).length, 1, 'unknown artist falls back to title initial');
+assert.deepEqual([...letterView.columns], ['A', 'B', 'C', 'D', 'E'], 'letter columns use song titles rather than artist names');
+assert.equal(letterView.musicTracks[0].id, 't2', 'song A stays in A even when its artist starts with B');
+const titleLetterView = buildMusicView([
+  mk('a-later', 'Aurora', 'Alpha', 'Album A', 1),
+  mk('a-first', 'Afterglow', 'Zulu', 'Album Z', 99),
+  mk('c-later', '春雨', 'Alpha', 'Album A', 1),
+  mk('c-first', '陈情', 'Zulu', 'Album Z', 99),
+  mk('z-song', '周末', 'Alpha', 'Album A', 1),
+  mk('numeric-song', '3 Days', 'Alpha', 'Album A', 1),
+  mk('untitled-song', '', 'Alpha', 'Album A', 1),
+], 'letter');
+assert.deepEqual([...titleLetterView.columns], ['A', 'C', 'Z', '#'], 'Chinese song initials use pinyin, other title initials stay in #');
+assert.deepEqual(titleLetterView.columnFiles(0).map(i => titleLetterView.musicTracks[i].id), ['a-first', 'a-later'], 'members sort by song title before artist, album or track number');
+assert.deepEqual(titleLetterView.columnFiles(1).map(i => titleLetterView.musicTracks[i].id), ['c-first', 'c-later'], 'Chinese titles sort by pinyin within their letter column');
+assert.equal(titleLetterView.musicTracks[titleLetterView.columnFiles(2)[0]].id, 'z-song', 'Chinese song title and artist initials can differ');
+assert.equal(titleLetterView.columnFiles(3).length, 2, 'numeric and empty titles do not fall back to artist initials');
+for (let index = 0; index < titleLetterView.records.length; index++) {
+  assert.equal(titleLetterView.backingId(index), titleLetterView.musicTracks[index].id, 'title sorting keeps actual playback ids aligned');
+}
 // Detail mapping gives every record a displayable, non-empty shape.
 for (const record of albumView.records) {
   assert.ok(record.id.startsWith('M-') && record.title && record.en && record.department && record.category && record.clearance && record.abstract);

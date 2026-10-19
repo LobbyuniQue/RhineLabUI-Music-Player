@@ -132,13 +132,13 @@ npm run start:all -- --root "D:\Music"
 - 封面对象 URL 使用默认 384 项缓存预算；可见封面、选中歌曲和正在使用的封面会保留，离开后可回收。全部条目都在使用时允许暂时超出预算。
 - 完整动画的结束帧对齐的是播放调用。浏览器音频输出及 VLC 本地服务、声卡仍存在缓冲和通信延迟，不能承诺实际声波与屏幕帧严格同步。
 
-0.1.4 发布前的本机 Windows 验证：基础检查与构建通过，播放协调回归 **21/21**、浏览器音乐集成 **42/42**、VLC UI 集成 **24/24**。两种动画策略及实际验证范围见 [音乐动画策略验证](verification/MUSIC-ANIMATION-POLICY.md)。远端验收以本次提交对应的 Actions 结果为准，本机结果与远端结果分别记录。
+0.1.4 发布前的本机 Windows 验证：基础检查与构建通过，播放协调回归 **21/21**、浏览器音乐集成 **42/42**、VLC UI 集成 **24/24**。两种动画策略及实际验证范围见 [音乐动画策略验证](verification/MUSIC-ANIMATION-POLICY.md)。以上为 0.1.4 的历史本机结果，当前基线的验证见下方开发说明。
 
 按需加载初版见 [按需加载与播放同步验证](verification/MUSIC-ACCESS.md)，0.1.2 历史修复见 [音乐稳定性验证](verification/MUSIC-RELIABILITY.md)。
 
 历史远端验收：[运行 38260385902](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/actions/runs/38260385902) 的基础检查、构建、VLC 获取校验、协议及浏览器集成通过；VLC UI 前 19 项通过后，完整归位在 240 秒截止时尚未完成，最后一项交接检查未执行，该次 Windows 集成未全部通过。
 
-0.1.3 的活动时间与归位阶段修复见 [三维归位验证](verification/ARCHIVE-RETURN-TIMING.md)。其后提交 `deed485` 的 [运行 38326506016](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/actions/runs/38326506016) 已全部通过，包括 VLC 获取校验、协议 10 项、浏览器 37/37 和 VLC UI 21/21；这是此前版本的远端记录。0.1.4 远端验收以 [本次提交的 Actions](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/actions/workflows/ci.yml) 为准。
+0.1.3 的活动时间与归位阶段修复见 [三维归位验证](verification/ARCHIVE-RETURN-TIMING.md)。其后提交 `deed485` 的 [运行 38326506016](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/actions/runs/38326506016) 已全部通过，包括 VLC 获取校验、协议 10 项、浏览器 37/37 和 VLC UI 21/21；这是此前版本的远端记录。后续版本按各自提交的 Actions 与版本记录追溯。
 
 ## 开发、构建与检查
 
@@ -196,7 +196,7 @@ npm run test:e2e:music
 
 测试曲库由脚本生成，截图位于 `.local/screenshots/music/`，浏览器配置与样本放在 `.local/` 对应子目录。工具只结束自己启动的进程树。更多参数见 [端到端工具说明](scripts/e2e/README.md)。
 
-当前版本的本机结果与环境见 [音乐动画策略验证](verification/MUSIC-ANIMATION-POLICY.md)。CI 包含 Windows Edge、VLC 获取校验、VLC 协议与音乐界面检查，并保存日志和截图；VLC 获取成功与三项集成测试通过分别确认，远端执行结果以 GitHub Actions 为准。历史记录见 [音乐验证](verification/LOCAL-MUSIC.md)和 [目录维护验证](verification/DIRECTORY-MAINTENANCE.md)。
+当前基线的本机结果与环境见 [basic 验证记录](verification/BASIC-BASELINE.md)；0.1.4 的历史动画验证见 [音乐动画策略验证](verification/MUSIC-ANIMATION-POLICY.md)。CI 包含 Windows Edge、VLC 获取校验、VLC 协议与音乐界面检查，并保存日志和截图；VLC 获取成功与三项集成测试通过分别确认，远端执行结果以 GitHub Actions 为准。历史记录见 [音乐验证](verification/LOCAL-MUSIC.md)和 [目录维护验证](verification/DIRECTORY-MAINTENANCE.md)。
 
 ## 项目目录
 

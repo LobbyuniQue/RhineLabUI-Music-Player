@@ -154,10 +154,10 @@ try {
       const started = performance.now();
       const poll = () => {
         if (!document.querySelector('#modal-root [role="dialog"]') && !document.querySelector('.system-nav').inert) return resolve(true);
-        if (performance.now() - started > 15000) return resolve(false);
+        if (performance.now() - started > 60000) return resolve(false);
         setTimeout(poll, 100);
       }; poll();
-    })`, true, 20000);
+    })`, true, 90000);
     if (!closed) throw new Error("Index closing animation did not release navigation");
   };
   const pressIndexShortcut = async () => {

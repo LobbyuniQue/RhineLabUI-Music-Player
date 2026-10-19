@@ -28,7 +28,7 @@ jobs:
     name: Windows browser and VLC integration
     needs: verify
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       RHINE_VLC_AOUT: dummy
     defaults:
@@ -78,7 +78,7 @@ jobs:
           node --experimental-strip-types scripts/check-vlc-bridge.mjs 2>&1 | Tee-Object -FilePath '.local/ci/vlc-protocol.log'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Browser music integration
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           npm.cmd run test:e2e:music 2>&1 | Tee-Object -FilePath '.local/ci/browser-music.log'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

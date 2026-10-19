@@ -175,18 +175,17 @@ try {
   };
 
   const closeModal = async () => {
-    await cdp.evaluate(`window.rhine.music.close()`, false, 20000);
-    const deadline = Date.now() + 15000;
-    while (Date.now() < deadline) {
-      const closed = await cdp.evaluate(
-        `!document.querySelector('#modal-root [role="dialog"]')`,
-        false,
-        20000,
-      );
-      if (closed) return;
-      await sleep(300);
-    }
-    throw new Error("Modal closing animation did not remove its dialog");
+    const closed = await cdp.evaluate(`new Promise(resolve => {
+      window.rhine.music.close();
+      const started = performance.now();
+      const poll = () => {
+        const navigationReady = window.rhine.stats().mode === 'boot' || !document.querySelector('.system-nav').inert;
+        if (!document.querySelector('#modal-root [role="dialog"]') && navigationReady) return resolve(true);
+        if (performance.now() - started > 60000) return resolve(false);
+        setTimeout(poll, 100);
+      }; poll();
+    })`, true, 90000);
+    if (!closed) throw new Error("Modal closing animation did not remove its dialog and release navigation");
   };
   const nativeStatus = async () => {
     const response = await fetch(`http://127.0.0.1:${PORT}/api/status`, {
@@ -253,6 +252,7 @@ try {
     JSON.stringify(library),
   );
 
+  const panelSceneMode = await cdp.evaluate(`window.rhine.stats().mode`, false, 20000);
   await cdp.evaluate(
     `(async () => { window.rhine.music.open(); await new Promise(r => setTimeout(r, 900)); return true; })()`,
     true,
@@ -376,8 +376,11 @@ try {
     join(SHOTS, "music-panel-vlc.png"),
     Buffer.from(panelShot.data, "base64"),
   );
-  // The large viewport is for the screenshot; use the normal test viewport
-  // while waiting for full-motion animation under software rendering.
+  // Restore the scene that was active when the dialog captured its sibling
+  // focus/inert state. Keeping this archive-only layout probe active would
+  // restore boot navigation state into a different scene on close.
+  if (panelSceneMode === 'boot') await cdp.evaluate(`window.rhine.seek(0)`, false, 20000);
+  // Restore the normal viewport before the subsequent animation checks.
   await cdp.send("Emulation.clearDeviceMetricsOverride");
 
   // 2.3: ACCESS FILE from a music archive must route the selected real bridge id

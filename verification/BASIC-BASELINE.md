@@ -26,4 +26,6 @@
 
 [第四轮 39301995432](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/actions/runs/39301995432) 已通过完整浏览器步骤；VLC UI 的面板几何断言通过后，1600×1000 截图命中 `Page.captureScreenshot` 超时，后续 VLC UI 项目未执行。将相同的低 DPR 策略同步到这一截图段，仍保留真实 CSS 尺寸与全部后续测试，最终结论另按最新提交运行确认。
 
+[第五轮 39305862908](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/actions/runs/39305862908) 的浏览器步骤再次通过，VLC 布局与截图也已越过原失败点，但其独立的关闭轮询仍使用 15 秒期限。VLC 关闭观察随之统一为页面内 60 秒、CDP 90 秒。本机复核还确认布局探针临时进入档案后未恢复原开场场景，使对话框恢复的导航状态与当前场景不一致；现在截图后恢复原场景，关闭检查按实际场景判断导航（开场保持锁定，其余场景需解锁）。该轮 VLC UI 未全部通过。
+
 本机日志保存在被忽略的 `.local/basic-baseline-20261020/`。可在 [basic 分支的 Actions 记录](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/actions/workflows/ci.yml?query=branch%3Abasic)中按本标签指向的提交核对本次运行。下载成功、上传工件成功以及测试实际执行通过分别确认；完整运行结论另记于基线发布说明。

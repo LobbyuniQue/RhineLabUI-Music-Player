@@ -344,7 +344,9 @@ try {
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 1600,
     height: 1000,
-    deviceScaleFactor: 1,
+    // Preserve CSS geometry while keeping this screenshot's software raster
+    // load comparable to the normal small test viewport.
+    deviceScaleFactor: 0.25,
     mobile: false,
   });
   await sleep(1200);
@@ -357,12 +359,14 @@ try {
       const r = modal.querySelector(selector).getBoundingClientRect();
       return { top:r.top, bottom:r.bottom, height:r.height };
     };
-    return { searchHeight:parseFloat(getComputedStyle(modal.querySelector('.search-field')).height),
+    return { viewportWidth:innerWidth, viewportHeight:innerHeight, deviceRatio:devicePixelRatio,
+      searchHeight:parseFloat(getComputedStyle(modal.querySelector('.search-field')).height),
       headingGap:rect('.search-field').top-rect('h2').bottom,
       header:rect('.result-header'), list:rect('#music-results'), first:rect('#music-results .result-row'),
       bar:rect('#music-bar'), footer:rect('.modal-bottom'), modalOverflow:modal.scrollHeight-modal.clientHeight };
   })()`, false, 30000);
   check('VLC 音乐面板：搜索紧凑，文件夹预设、表头、列表与播放器互不遮挡',
+    layout.viewportWidth === 1600 && layout.viewportHeight === 1000 && layout.deviceRatio === 0.25 &&
     layout.searchHeight >= 40 && layout.searchHeight <= 48 && layout.headingGap >= 0 && layout.headingGap <= 20 &&
     layout.header.bottom <= layout.list.top+1 && layout.header.bottom <= layout.first.top+1 &&
     layout.list.bottom <= layout.bar.top+1 && layout.bar.bottom <= layout.footer.top+1 &&

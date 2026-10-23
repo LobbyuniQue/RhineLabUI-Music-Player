@@ -5,7 +5,8 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { ARRAY_CARD_SURFACES, setCardInteriorVisible } from "../src/card-structure.ts";
 import { LOOP_COLUMNS, LOOP_ROWS, poolCell, sameCell, selectionCell } from "../src/archive-loop.ts";
-import { activeView } from "../src/archive-view.ts";
+import { activeView, buildView, rhineView, setActiveView } from "../src/archive-view.ts";
+import { drawAlbumLabel } from "../src/album-label.ts";
 import { glassRevealGLSL, frostedTransmissionGLSL, FROSTED_ROUGHNESS } from "../src/glass-reveal.ts";
 import { configureInternalOptics, internalOpticsFragment } from "../src/internal-optics.ts";
 import { themeMaterial } from "../src/theme-material.ts";
@@ -26,7 +27,7 @@ const source = await readFile(new URL("../src/scene.ts", import.meta.url), "utf8
 const ast = ts.createSourceFile("scene.ts", source, ts.ScriptTarget.Latest, true);
 const sceneClass = ast.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === "ArchiveScene");
 assert.ok(sceneClass, "Production ArchiveScene must exist");
-const members = ["cardInteriorVisible", "setCardInteriorVisible", "load", "select", "createAssemblyModel"].map(name => {
+const members = ["cardInteriorVisible", "setCardInteriorVisible", "load", "select", "createAssemblyModel", "drawLabel", "drawMusicLabel"].map(name => {
   const member = sceneClass.members.find(node => node.name?.getText(ast) === name);
   assert.ok(member, `Production ArchiveScene.${name} must exist`);
   return member.getText(ast);
@@ -42,10 +43,33 @@ class LocalGLTFLoader {
     return new GLTFLoader().parseAsync(assets.get(name), "");
   }
 }
-const canvas = () => ({ width: 0, height: 0, getContext: () => ({ drawImage() {} }) });
+// Record drawing without a second implementation of the production layout.
+// Persistent contexts also catch unbalanced transforms when changing views.
+const canvases = [];
+function canvas() {
+  const element = { width: 0, height: 0 };
+  const calls = [];
+  let depth = 0;
+  const context = {
+    canvas: element, calls,
+    get depth() { return depth; },
+    save() { depth++; },
+    restore() { assert.ok(depth > 0, "Canvas restore must match a save"); depth--; },
+    setTransform(...args) { calls.push(["setTransform", ...args]); },
+    fillRect(...args) { calls.push(["fillRect", ...args]); },
+    fillText(...args) { calls.push(["fillText", ...args]); },
+    drawImage(...args) { calls.push(["drawImage", ...args]); },
+    measureText: text => ({ width: Array.from(text).length * 30 }),
+    createLinearGradient: () => ({ addColorStop() {} }),
+    beginPath() {}, rect() {}, clip() {}, arc() {}, stroke() {}, fill() {},
+  };
+  element.getContext = () => context;
+  canvases.push(element);
+  return element;
+}
 const deps = { THREE, CardAppearance, ARRAY_CARD_SURFACES, setCardInteriorVisible,
   GLTFLoader: LocalGLTFLoader, LOOP_COLUMNS, LOOP_ROWS, poolCell, sameCell, selectionCell,
-  configureInternalOptics, themeMaterial, labelMarkSvg: "<svg/>",
+  configureInternalOptics, themeMaterial, labelMarkSvg: "<svg/>", activeView, drawAlbumLabel,
   publicAsset: value => value, document: { createElement: canvas },
   fileLocation: index => activeView().fileLocation(index),
   ease: value => THREE.MathUtils.smootherstep(value, 0, 1) };
@@ -61,7 +85,7 @@ function fixture() {
     looping: true, lift: { value: 1.4, velocity: .2 }, rotation: .7,
     decryption: { select() {} }, themeAmount: 0,
     cellPosition: () => new THREE.Vector3(), modelClarity: () => .65,
-    drawLabel() {}, cancelPointer() {}, setHover() {}, markMotionChange() {}, emitPulse() {},
+    cancelPointer() {}, setHover() {}, markMotionChange() {}, emitPulse() {},
   });
   return f;
 }
@@ -181,5 +205,133 @@ await check("nested future interior surfaces are excluded without hiding untagge
   setCardInteriorVisible(group, true);
   assert.equal(interior.visible, true); assert.equal(canvasMesh.visible, true);
 });
+
+const musicView = buildView("music", ["Synthetic Album"], undefined,
+  [0, 1].map(index => ({ ...rhineView.records[0],
+    id: `M-00${index + 1}`, title: `Synthetic Song ${index + 1}`,
+    en: "Synthetic Artist", department: "Synthetic Album", category: "Synthetic Album", clearance: "FLAC",
+  })), () => 0, index => `synthetic-track-${index}`);
+const labelOf = model => model.children.at(-1);
+const dimensions = canvas => [canvas.width, canvas.height];
+const transform = label => ({ position: label.position.toArray(), scale: label.scale.toArray() });
+function assertArtwork(label, expected) {
+  assert.equal(label.userData.albumArtwork.value, expected);
+  const shader = { uniforms: {}, vertexShader: "#include <begin_vertex>", fragmentShader: "#include <opaque_fragment>" };
+  label.material.onBeforeCompile(shader);
+  assert.equal(shader.uniforms.rhinePreserveArtwork, label.userData.albumArtwork,
+    "The compiled printed material must use this label's live artwork flag");
+  assert.equal(shader.uniforms.rhineTheme, label.userData.themeAmount);
+  assert.match(shader.fragmentShader, /outgoingLight = mix\(outgoingLight,/);
+  assert.match(shader.fragmentShader, /rhineTheme \* \(1\.0 - rhinePreserveArtwork\)/,
+    "Music art bypasses dark recoloring while archive labels retain it");
+}
+const albumTransform = { position: [0, 1.85, .255], scale: [4.64 / .99, 3.34 / .46, 1] };
+const archiveTransform = { position: [-1.36, 3.04, .255], scale: [1, 1, 1] };
+const album = fixture();
+setActiveView(musicView);
+try {
+  await check("music loading paints the full album face with the real title and artist", async () => {
+    album.selectedCell = musicView.fileLocation(0);
+    await album.load();
+    const label = labelOf(album.model);
+    assert.deepEqual(transform(label), albumTransform);
+    assertArtwork(label, 1);
+    assert.deepEqual(dimensions(album.labelCanvas), [1536, 1104]);
+    assert.equal(label.material.map, album.labelTexture);
+    const context = album.labelCanvas.getContext("2d");
+    const texts = context.calls.filter(call => call[0] === "fillText").map(call => call[1]);
+    assert.ok(texts.includes("Synthetic Song 1") && texts.some(text => text.includes("Synthetic Artist")));
+    assert.ok(texts.includes("NO COVER ART"), "No cover uses the production album placeholder");
+    assert.equal(context.depth, 0, "Album drawing restores the canvas transform");
+  });
+  await check("rapid music selection freezes a full-size independent album texture on the returning card", () => {
+    const source = album.labelCanvas;
+    const cover = { width: 800, height: 800 };
+    album.drawLabel(0, cover);
+    const image = source.getContext("2d").calls.findLast(call => call[0] === "drawImage");
+    assert.equal(image[1], cover, "Decoded art reaches the actual selected label");
+    album.setCardInteriorVisible(false);
+    album.select(1, { cell: musicView.fileLocation(1) });
+    assert.equal(album.outgoing.length, 1);
+    const label = labelOf(album.outgoing[0].group);
+    assert.deepEqual(transform(label), albumTransform);
+    assertArtwork(label, 1);
+    assert.notEqual(label.userData.albumArtwork, labelOf(album.model).userData.albumArtwork,
+      "Returning labels must retain an independent artwork flag after the selected view changes");
+    assert.notEqual(label.material.map, album.labelTexture);
+    assert.notEqual(label.material.map.image, source);
+    assert.deepEqual(dimensions(label.material.map.image), dimensions(source));
+    assert.deepEqual(label.material.map.image.getContext("2d").calls, [["drawImage", source, 0, 0]],
+      "The snapshot copies the full selected canvas before the next title is painted");
+    assertStructure(album.outgoing[0].group, false);
+  });
+  await check("the assembly viewer copies the album transform and owns a disposable texture snapshot", async () => {
+    const viewer = await album.createAssemblyModel();
+    const label = labelOf(viewer.model);
+    assert.deepEqual(transform(label), albumTransform);
+    assertArtwork(label, 1);
+    assert.notEqual(label.userData.albumArtwork, labelOf(album.model).userData.albumArtwork);
+    assert.notEqual(label.userData.albumArtwork, labelOf(album.outgoing[0].group).userData.albumArtwork);
+    labelOf(album.model).userData.albumArtwork.value = 0;
+    assertArtwork(label, 1);
+    labelOf(album.model).userData.albumArtwork.value = 1;
+    album.appearance.setTheme(viewer.model, 1);
+    assert.equal(label.userData.themeAmount.value, 1);
+    assertArtwork(label, 1);
+    assert.equal(label.userData.assemblyPart, "cover");
+    assert.notEqual(label.material.map, album.labelTexture);
+    assert.deepEqual(dimensions(label.material.map.image), dimensions(album.labelCanvas));
+    assert.deepEqual(label.material.map.image.getContext("2d").calls, [["drawImage", album.labelCanvas, 0, 0]]);
+    assertStructure(viewer.model, false);
+    let disposed = 0;
+    label.material.map.addEventListener("dispose", () => disposed++);
+    viewer.dispose();
+    assert.equal(disposed, 1, "The assembly releases its texture when closed");
+  });
+  await check("switching between album and archive restores label geometry without reallocating textures", async () => {
+    const label = labelOf(album.model), texture = album.labelTexture;
+    const geometry = label.geometry, material = label.material;
+    const canvasCount = canvases.length;
+    let disposed = 0;
+    texture.addEventListener("dispose", () => disposed++);
+    const version = texture.version;
+    for (let round = 0; round < 3; round++) {
+      setActiveView(rhineView);
+      album.drawLabel(0);
+      assert.deepEqual(transform(label), archiveTransform);
+      assertArtwork(label, 0);
+      assertArtwork(labelOf(album.outgoing[0].group), 1);
+      const context = album.labelCanvas.getContext("2d");
+      assert.deepEqual(context.calls.findLast(call => call[0] === "setTransform"),
+        ["setTransform", 1536 / 1024, 0, 0, 1104 / 440, 0, 0]);
+      assert.ok(context.calls.some(call => call[0] === "fillText" && call[1] === "RHINE LAB, LLC."));
+      assert.equal(context.depth, 0);
+      setActiveView(musicView);
+      album.drawLabel(1);
+      assert.deepEqual(transform(label), albumTransform);
+      assertArtwork(label, 1);
+      assert.equal(label.geometry, geometry);
+      assert.equal(label.material, material);
+      assert.equal(label.material.map, texture);
+      assert.equal(album.labelTexture, texture);
+      assert.equal(context.depth, 0);
+    }
+    assert.equal(canvases.length, canvasCount, "Library switches reuse the same canvas and texture allocation");
+    assert.equal(disposed, 0);
+    assert.equal(texture.version, version + 6, "Every new face requests one texture update");
+    assert.deepEqual(transform(labelOf(album.outgoing[0].group)), albumTransform,
+      "Changing the selected face does not resize its returning snapshot");
+    setActiveView(rhineView);
+    album.drawLabel(0);
+    const archive = await album.createAssemblyModel();
+    assert.deepEqual(transform(labelOf(archive.model)), archiveTransform,
+      "A newly opened archive viewer restores the small original label");
+    assertArtwork(labelOf(archive.model), 0);
+    assert.notEqual(labelOf(archive.model).userData.albumArtwork, label.userData.albumArtwork);
+    archive.dispose();
+  });
+} finally {
+  setActiveView(rhineView);
+}
 console.log(`${passed}/${passed + failed} music model structure checks passed.`);
 process.exitCode = failed ? 1 : 0;

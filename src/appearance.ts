@@ -25,7 +25,8 @@ export class CardAppearance {
       const name = mesh.userData.surface as string;
       const palette = this.palettes.get(name);
       if (!palette) {
-        mesh.userData.themeAmount = themeMaterial(mesh.material as THREE.Material, "Printed_Canvas");
+        mesh.userData.albumArtwork ??= { value: 0 };
+        mesh.userData.themeAmount = themeMaterial(mesh.material as THREE.Material, "Printed_Canvas", false, undefined, mesh.userData.albumArtwork);
         continue;
       }
       const mat = palette.high.clone();

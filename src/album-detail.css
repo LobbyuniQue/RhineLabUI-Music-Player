@@ -1,0 +1,140 @@
+/* The 3D sleeve carries the artwork; the adjacent column reads like liner notes. */
+.detail-ui[data-kind="music"] .object-caption > :is(span, div, small) {
+  display: none;
+}
+[data-layout="desktop"] .detail-ui[data-kind="music"] .back-button {
+  top: 238px;
+}
+[data-layout="desktop"] .detail-ui[data-kind="music"] .object-caption {
+  bottom: 88px;
+}
+.detail-content.music-detail {
+  top: 273px;
+}
+.music-detail .detail-kicker {
+  font-size: 10px;
+  letter-spacing: 2.4px;
+  color: var(--theme-accent, #9b7247);
+}
+.music-detail .detail-kicker span:last-child {
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--theme-muted, #77756d);
+}
+.detail-content.music-detail h2 {
+  margin: 26px 0 11px;
+  font-size: 46px;
+  font-weight: 600;
+  line-height: 1.16;
+  letter-spacing: -1px;
+  text-wrap: pretty;
+}
+.detail-content.music-detail .detail-title-cn {
+  display: block;
+  font-size: 20px;
+  line-height: 1.5;
+  color: var(--theme-muted, #77756d);
+}
+.music-detail .detail-rule {
+  height: 1px;
+  margin-top: 27px;
+  background: var(--theme-line, #aaa59a);
+}
+.music-detail .music-album-metadata {
+  grid-template-columns: minmax(0, 2fr) minmax(0, .8fr) minmax(0, .7fr);
+  gap: 22px;
+  margin: 21px 0 30px;
+}
+.music-album-metadata > div {
+  min-width: 0;
+}
+.music-album-metadata dt {
+  font-size: 9px;
+  letter-spacing: 1px;
+}
+.music-album-metadata dd {
+  margin-top: 9px;
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.music-detail .detail-tabs {
+  gap: 29px;
+}
+.music-detail .detail-tabs button {
+  padding-bottom: 13px;
+}
+.music-detail .tab-panel {
+  height: 163px;
+  padding-top: 18px;
+}
+.music-detail .tab-panel p {
+  margin-top: 12px;
+  line-height: 1.85;
+  text-align: left;
+}
+.music-detail .detail-actions {
+  margin-top: 13px;
+}
+.music-detail .export-button {
+  width: 140px;
+  border-bottom: 1px solid var(--theme-line, #aaa59a);
+}
+.music-detail .detail-footnote {
+  gap: 22px;
+  margin-top: 24px;
+  line-height: 1.7;
+}
+.music-detail .detail-footnote > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.music-detail .detail-footnote > span:last-child {
+  flex-shrink: 0;
+}
+:is([data-layout="compact"], [data-layout="portrait"]) .detail-content.music-detail {
+  top: 84px;
+}
+:is([data-layout="compact"], [data-layout="portrait"]) .detail-content.music-detail h2 {
+  margin: 18px 0 9px;
+  font-size: 30px;
+  line-height: 1.2;
+  letter-spacing: -.5px;
+}
+:is([data-layout="compact"], [data-layout="portrait"]) .music-detail .detail-kicker {
+  font-size: 8px;
+  letter-spacing: 1.4px;
+}
+:is([data-layout="compact"], [data-layout="portrait"]) .music-detail .detail-kicker span:last-child {
+  font-size: 9px;
+}
+:is([data-layout="compact"], [data-layout="portrait"]) .detail-content.music-detail .detail-title-cn {
+  font-size: 16px;
+}
+:is([data-layout="compact"], [data-layout="portrait"]) .music-detail .detail-rule {
+  margin-top: 19px;
+}
+:is([data-layout="compact"], [data-layout="portrait"]) .music-detail .music-album-metadata {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 20px;
+  margin: 17px 0 19px;
+}
+:is([data-layout="compact"], [data-layout="portrait"]) .music-album-metadata > div:first-child {
+  grid-column: 1 / -1;
+}
+:is([data-layout="compact"], [data-layout="portrait"]) .music-detail .detail-tabs {
+  gap: 18px;
+}
+:is([data-layout="compact"], [data-layout="portrait"]) .music-detail .detail-tabs button {
+  padding: 8px 0;
+}
+:is([data-layout="compact"], [data-layout="portrait"]) .music-detail .tab-panel {
+  height: auto;
+  padding-top: 14px;
+}
+:is([data-layout="compact"], [data-layout="portrait"]) .music-detail .export-button {
+  width: 130px;
+}
+[data-layout="portrait"] .detail-content.music-detail {
+  top: 54%;
+}

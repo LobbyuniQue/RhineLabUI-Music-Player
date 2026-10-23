@@ -104,8 +104,17 @@ try {
     assert.deepEqual([...atlas.filled].sort(), visible.slice().sort(), "offscreen art releases its cache entry");
   }
   assert.ok(decoded > 1200);
-  assert.deepEqual(draws[0].slice(1, 5), [0, 1, 4, 4], "non-square art is center cropped");
+  const assertCrop = (draw, expected, message) => {
+    draw.slice(1, 5).forEach((value, index) => assert.ok(Math.abs(value - expected[index]) < 1e-9, message));
+  };
+  assertCrop(draws[0], [0, 173 / 96, 4, 115 / 48], "portrait art is centered against the wide album cover area");
   assert.deepEqual(draws[0].slice(-2), [ATLAS_TILE, ATLAS_TILE]);
+  atlas.retain(["wide-art"]);
+  assert.ok(atlas.fill("wide-art", { width: 600, height: 100 }, atlas.ticketFor("wide-art")));
+  const wide = draws.at(-1);
+  assertCrop(wide, [(600 - 100 * 1536 / 920) / 2, 0, 100 * 1536 / 920, 100],
+    "panoramic art crops the horizontal edges rather than stretching the image");
+  assert.deepEqual(wide.slice(-2), [ATLAS_TILE, ATLAS_TILE], "the shader restores the album crop from its square atlas tile");
 
   // Pin the complete next frame before reading tiles. Existing visible art
   // cannot be evicted midway through the frame, even at the capacity boundary.

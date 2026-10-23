@@ -21,7 +21,7 @@ import { ARRAY_CARD_SURFACES, setCardInteriorVisible } from "./card-structure";
 import { configureInternalOptics } from "./internal-optics";
 import { DecryptionController } from "./decryption";
 import { activeView } from "./archive-view";
-import { musicLabelLines } from "./music-label";
+import { drawAlbumLabel } from "./album-label";
 import { clampRowSpacing, railFromRow, rowFromRail } from "./row-spacing";
 const fileAtSlot = (slot: number) => activeView().fileAtSlot(slot);
 const fileLocation = (index: number) => activeView().fileLocation(index);
@@ -498,9 +498,8 @@ export class ArchiveScene {
       this.instances.push(inst);
       this.scene.add(inst);
     }
-    // Paint the cover into the front panel itself. The compact archive rows
-    // overlap vertically, so only the exposed upper band is used; the panel's
-    // own depth/silhouette then prevents artwork from crossing cards.
+    // Match the album face on the selected card. Artwork stays on the panel's
+    // own surface, so compact overlapping rows keep their physical occlusion.
     const coverSurface = this.instances.find((inst) => inst.userData.surface === "Frosted_Polymer");
     if (coverSurface) {
       this.coverAttribute = new THREE.InstancedBufferAttribute(new Float32Array(count), 1).setUsage(THREE.DynamicDrawUsage);
@@ -508,7 +507,8 @@ export class ArchiveScene {
       const coverMaterial = coverSurface.material as THREE.MeshPhysicalMaterial;
       const beforeCover = coverMaterial.onBeforeCompile;
       const cacheCover = coverMaterial.customProgramCacheKey.bind(coverMaterial)();
-      const coverX = 0.1, coverY = 1.68, coverSize = 2.1;
+      const coverWidth = 4.64, coverHeight = 3.34 * 920 / 1104;
+      const coverLeft = -coverWidth / 2, coverBottom = 1.85 + 3.34 / 2 - coverHeight;
       const coverUniform = { value: this.coverTexture };
       const coverEnabled = { value: this.coverProvider ? 1 : 0 };
       this.coverUniform = coverUniform;
@@ -525,7 +525,7 @@ export class ArchiveScene {
         shader.uniforms.rhineCoverEnabled = coverEnabled;
         shader.fragmentShader = shader.fragmentShader.replace(
           "#include <opaque_fragment>",
-          `vec2 rhineCoverLocal = (vRhineCoverPosition - vec2(${(coverX - coverSize / 2).toFixed(4)}, ${(coverY - coverSize / 2).toFixed(4)})) / ${coverSize.toFixed(4)};
+          `vec2 rhineCoverLocal = (vRhineCoverPosition - vec2(${coverLeft.toFixed(4)}, ${coverBottom.toFixed(4)})) / vec2(${coverWidth.toFixed(4)}, ${coverHeight.toFixed(4)});
 float rhineCoverMask = step(0.0, rhineCoverLocal.x) * step(rhineCoverLocal.x, 1.0) * step(0.0, rhineCoverLocal.y) * step(rhineCoverLocal.y, 1.0);
 if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
   vec2 rhineCoverTile = vec2(mod(vArchiveCover, 16.0), 15.0 - floor(vArchiveCover / 16.0));
@@ -538,8 +538,10 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
       coverMaterial.customProgramCacheKey = () => `${cacheCover}-rhine-cover-atlas`;
       coverSurface.userData.coverMaterial = coverMaterial;
     }
-    this.labelCanvas.width = 1024;
-    this.labelCanvas.height = 440;
+    // Keep one texture allocation across library switches. Archive artwork is
+    // drawn with its original logical dimensions into this shared canvas.
+    this.labelCanvas.width = 1536;
+    this.labelCanvas.height = 1104;
     this.labelTexture = new THREE.CanvasTexture(this.labelCanvas);
     this.labelTexture.colorSpace = THREE.SRGBColorSpace;
     this.labelTexture.anisotropy =
@@ -614,9 +616,12 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
         depthWrite: false,
       }),
     );
-    label.position.set(-1.36, 3.04, 0.255);
+    const selectedLabel = this.model.children[this.model.children.length - 1];
+    label.position.copy(selectedLabel.position);
+    label.scale.copy(selectedLabel.scale);
     label.userData.assemblyPart = "cover";
-    label.userData.themeAmount = themeMaterial(label.material, "Printed_Canvas");
+    label.userData.albumArtwork = { value: selectedLabel.userData.albumArtwork?.value ?? 0 };
+    label.userData.themeAmount = themeMaterial(label.material, "Printed_Canvas", false, undefined, label.userData.albumArtwork);
     label.userData.themeAmount.value = this.themeAmount;
     model.add(label);
     meshes.push(label);
@@ -792,8 +797,8 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
       const group = this.model.clone(true);
       const label = group.children[group.children.length - 1] as THREE.Mesh;
       const canvas = document.createElement("canvas");
-      canvas.width = 1024;
-      canvas.height = 440;
+      canvas.width = this.labelCanvas.width;
+      canvas.height = this.labelCanvas.height;
       canvas.getContext("2d")!.drawImage(this.labelCanvas, 0, 0);
       const map = new THREE.CanvasTexture(canvas);
       map.colorSpace = THREE.SRGBColorSpace;
@@ -854,19 +859,20 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
   redrawLabel(index: number, cover?: CanvasImageSource) {
     this.drawLabel(index, cover ?? null);
   }
-  private fitText(c: CanvasRenderingContext2D, text: string, maxWidth: number) {
-    if (c.measureText(text).width <= maxWidth) return text;
-    let clipped = text;
-    while (clipped.length > 1 && c.measureText(clipped + "…").width > maxWidth) clipped = clipped.slice(0, -1);
-    return clipped + "…";
-  }
   private drawLabel(index: number, cover: CanvasImageSource | null = null) {
     if (!this.labelTexture) return;
-    if (activeView().kind === "music") {
+    const music = activeView().kind === "music";
+    const label = this.model.children[this.model.children.length - 1];
+    label.userData.albumArtwork.value = Number(music);
+    label.position.set(music ? 0 : -1.36, music ? 1.85 : 3.04, 0.255);
+    label.scale.set(music ? 4.64 / .99 : 1, music ? 3.34 / .46 : 1, 1);
+    if (music) {
       this.drawMusicLabel(index, cover);
       return;
     }
     const c = this.labelCanvas.getContext("2d")!;
+    c.save();
+    c.setTransform(this.labelCanvas.width / 1024, 0, 0, this.labelCanvas.height / 440, 0, 0);
     c.fillStyle = "#e6e2d9";
     c.fillRect(0, 0, 1024, 440);
     c.fillStyle = "#171713";
@@ -888,53 +894,14 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     c.font = "bold 64px MiSans";
     c.fillText("INFO", 830, 143);
     c.drawImage(this.labelMark, 790, 242, 210, 98);
+    c.restore();
     this.labelTexture.needsUpdate = true;
   }
-  /** Music archive label: cover art on the left, track metadata on the right. */
+  /** Music album sleeve: large artwork above a narrow metadata band. */
   private drawMusicLabel(index: number, cover: CanvasImageSource | null) {
     const record = activeView().records[index];
     const c = this.labelCanvas.getContext("2d")!;
-    c.fillStyle = "#e6e2d9";
-    c.fillRect(0, 0, 1024, 440);
-    c.fillStyle = "#171713";
-    c.fillRect(12, 12, 1000, 6);
-    c.fillRect(12, 419, 1000, 3);
-    if (cover) {
-      const image = cover as HTMLImageElement;
-      const w = image.naturalWidth || image.width || 1;
-      const h = image.naturalHeight || image.height || 1;
-      const side = Math.min(w, h);
-      c.drawImage(image, (w - side) / 2, (h - side) / 2, side, side, 22, 30, 380, 380);
-    } else {
-      c.fillStyle = "#d8d3c6";
-      c.fillRect(22, 30, 380, 380);
-      c.fillStyle = "#878476";
-      c.font = "110px MiSans";
-      c.textAlign = "center";
-      c.fillText("♪", 212, 248);
-      c.textAlign = "left";
-    }
-    c.strokeStyle = "#171713";
-    c.lineWidth = 4;
-    c.strokeRect(22, 30, 380, 380);
-    const tx = 436, tw = 1024 - tx - 24;
-    c.fillStyle = "#171713";
-    c.font = "bold 40px MiSans";
-    c.fillText("RHINE LAB, LLC.", tx, 86);
-    c.font = "25px MiSans";
-    c.fillStyle = "#878476";
-    c.fillText("INTERNAL DATABASE · MUSIC LIBRARY", tx, 126);
-    const lines = musicLabelLines(record ?? { en: "", title: "", department: "" });
-    c.fillStyle = "#171713";
-    c.font = "bold 56px MiSans";
-    c.fillText(this.fitText(c, lines.primary, tw), tx, 205);
-    c.font = "34px MiSans";
-    c.fillStyle = "#878476";
-    c.fillText(this.fitText(c, lines.secondary, tw), tx, 268);
-    c.fillStyle = "#171713";
-    c.font = "bold 84px MiSans";
-    c.fillText("NO." + String(index + 1).padStart(3, "0"), tx, 392);
-    c.drawImage(this.labelMark, 856, 330, 148, 69);
+    drawAlbumLabel(c, record ?? { en: "", title: "", department: "", clearance: "" }, index, cover);
     this.labelTexture!.needsUpdate = true;
   }
   private ensureInstanceCapacity(required: number) {

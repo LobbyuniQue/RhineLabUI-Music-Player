@@ -8,7 +8,9 @@ RhineLabUI 本地扩展工程，以三维档案阵列承载本地曲库，把歌
 
 当前基线为 **basic / 0.1.5**（2026-10-20）。它包含歌单更新，以及随后完成的歌名排序与标题显示、统一检索入口、音乐面板布局改进。GitHub 默认分支使用 [`basic`](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/tree/basic)，本次固定快照为 [`basic-0.1.5-20261020`](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/tree/basic-0.1.5-20261020)。
 
-本地 `experimental` 正在试验 **简化音乐档案**（2026-10-23）：音乐模式隐藏精细内构与雕刻，保留外壳、底板、封面和标签，覆盖选中卡片、归位副本及 360° 查看器。设置 → 本地音乐中的 `MUSIC MODEL` 开关可恢复完整模型，切回档案库始终显示完整结构。该实验默认开启，软件版本仍为 0.1.5，尚未合入 `basic`。范围和实际验证见 [音乐模型实验](verification/MUSIC-MODEL-EXPERIMENT.md)。
+本地 `experiment/album-edition` 保存 **专辑版实验**（2026-10-23）：音乐卡片改为大封面专辑，图片占正面约 83%，底部窄信息带显示歌名、歌手与专辑；右侧配套专辑内页排版。明暗主题保留封面原色，缺图使用唱片纹理占位，阵列、抽取卡、归位副本与 360° 查看器统一呈现。该分支在简化内构实验 `16478ed` 上继续开发，软件版本仍为 0.1.5，尚未合入 `basic`。设计与本轮实际验证见 [专辑版实验](verification/ALBUM-EDITION.md)。
+
+上一条 `experimental` 保留 **简化音乐档案实验**：音乐模式隐藏精细内构与雕刻，保留外壳、底板、封面和标签，覆盖选中卡片、归位副本及 360° 查看器。设置 → 本地音乐中的 `MUSIC MODEL` 开关可恢复完整模型，切回档案库始终显示完整结构。此行为在专辑版中继续保留。前轮数据见 [音乐模型实验](verification/MUSIC-MODEL-EXPERIMENT.md)。
 
 接下来的改动先在 `experimental` 或 `experiment/<主题>` 分支进行，完成验证与实际效果验收后，通过 Pull Request 合入 `basic`。`basic` 是可继续更新的基线分支，固定标签用于随时回到本次状态；`main` 保留既有历史。工作约定见 [基线与实验开发](docs/DEVELOPMENT.md)，本次收录范围见 [basic 基线说明](docs/releases/basic-0.1.5-20261020.md)。
 

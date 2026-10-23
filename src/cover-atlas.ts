@@ -115,8 +115,12 @@ export class CoverAtlas {
     const tile = this.assigned.get(id);
     if (tile === undefined || this.tickets.get(id) !== ticket) return false;
     const { x, y } = this.rect(tile);
-    const side = Math.min(image.width, image.height) || 1;
-    this.ctx.drawImage(image, (image.width - side) / 2, (image.height - side) / 2, side, side, x, y, ATLAS_TILE, ATLAS_TILE);
+    // Store the album face's crop in a square tile; the panel shader restores
+    // its physical aspect. This matches selected artwork for wide covers too.
+    const aspect = 1536 / 920;
+    const width = Math.min(image.width, image.height * aspect) || 1;
+    const height = width / aspect;
+    this.ctx.drawImage(image, (image.width - width) / 2, (image.height - height) / 2, width, height, x, y, ATLAS_TILE, ATLAS_TILE);
     this.filled.add(id);
     this.dirty = true;
     return true;

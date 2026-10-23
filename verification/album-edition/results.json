@@ -1,0 +1,127 @@
+{
+  "experiment": "专辑版 / Album edition",
+  "branch": "experiment/album-edition",
+  "version": "0.1.5",
+  "baseCommit": "16478ed4f3b2aa19768d2f7dfbe720f6c1d20c99",
+  "basicCommit": "46e0c0374f05855ca53921db471e4aa7fe166478",
+  "completedAt": "2026-10-23T14:21:06.976869+00:00",
+  "build": "09283d1f01d2c63b",
+  "validation": {
+    "projectCheck": "passed",
+    "build": "passed",
+    "canvas": {
+      "passed": 8,
+      "total": 8
+    },
+    "realGlbModels": {
+      "passed": 11,
+      "total": 11
+    },
+    "archiveCoordinator": {
+      "passed": 11,
+      "total": 11
+    },
+    "browserIntegration": {
+      "passed": 68,
+      "total": 68
+    },
+    "vlcUiIntegration": {
+      "passed": 31,
+      "total": 31,
+      "vlc": "3.0.21",
+      "audioOutputOverride": null,
+      "manualListening": false
+    },
+    "githubActions": "not-run",
+    "performanceBenchmark": "not-run"
+  },
+  "screenshots": [
+    {
+      "file": "01-专辑阵列-最短行距.png",
+      "caption": "音乐专辑阵列，封面与选中卡片使用相同裁切。",
+      "layout": "desktop",
+      "width": 1920,
+      "height": 1080,
+      "rowSpacing": 0.62,
+      "sha256": "3b57f260e284cfec16c3f5e6fe5f37da4f08f5510c40c323d83af5396f896cb0"
+    },
+    {
+      "file": "02-专辑详情-浅色.png",
+      "caption": "大幅封面，底部信息带与右侧专辑内页排版。",
+      "layout": "desktop",
+      "width": 1920,
+      "height": 1080,
+      "rowSpacing": 0.62,
+      "sha256": "a5b26f5f876463e9dad76c8b062c63e764f2194a87e2581336f014277a067d11"
+    },
+    {
+      "file": "03-专辑详情-暗色.png",
+      "caption": "暗色主题下的大封面与专辑内页。",
+      "layout": "desktop",
+      "width": 1920,
+      "height": 1080,
+      "rowSpacing": 0.62,
+      "sha256": "4c9bad290b0bf2833d424c0d9fd9c2e35c6695f494615f7b22783368bc2c056f"
+    },
+    {
+      "file": "04-专辑模型查看器.png",
+      "caption": "查看器沿用同一张完整专辑封面。",
+      "layout": "desktop",
+      "width": 1920,
+      "height": 1080,
+      "rowSpacing": 0.62,
+      "sha256": "13b3f96cdf6478562b9232e64140707a790d5966d2c27c367a27ec5f90527269"
+    },
+    {
+      "file": "05-专辑详情-紧凑窗口.png",
+      "caption": "1280×800 较小桌面窗口的专辑排版。",
+      "layout": "desktop",
+      "width": 1280,
+      "height": 800,
+      "rowSpacing": 0.62,
+      "sha256": "45a35d4e16f32f6e363fc3d1c994f3f318d54a542eef06a897d40739fc8dd28a"
+    },
+    {
+      "file": "07-专辑详情-横屏窄窗口.png",
+      "caption": "1024×768 compact 布局。",
+      "layout": "compact",
+      "width": 1024,
+      "height": 768,
+      "rowSpacing": 0.62,
+      "sha256": "1c34684d3708e60e2fdc52aecae6c5802afc859eb29d81601dedec21ab716d16"
+    },
+    {
+      "file": "08-专辑详情-竖屏.png",
+      "caption": "390×844 portrait 布局，封面在上，专辑内页在下。",
+      "layout": "portrait",
+      "width": 390,
+      "height": 844,
+      "rowSpacing": 0.62,
+      "sha256": "0df157a8701a5c6d95209de281512bda73fd5c29a7f75471077838fbf921eb75"
+    },
+    {
+      "file": "09-专辑详情-缺图与长歌名.png",
+      "caption": "缺失封面使用唱片纹理占位；长歌名在右侧自动换行，标签省略。",
+      "layout": "desktop",
+      "width": 1920,
+      "height": 1080,
+      "rowSpacing": 0.62,
+      "sha256": "14993d2c0f3fba7f95b8317bb58f099f3927f0878024cc35be887bc14a48dedd"
+    },
+    {
+      "file": "06-档案库-恢复原版.png",
+      "caption": "档案库保持原版标签与详情。",
+      "layout": "desktop",
+      "width": 1920,
+      "height": 1080,
+      "rowSpacing": 0.62,
+      "sha256": "ebf1cdf0327834d96e51adb32ab4d414ed905cf808ff4f9327e8d49029360b64"
+    }
+  ],
+  "notes": [
+    "All demonstrations use music row spacing 0.62; application default remains 4.05.",
+    "Synthetic metadata and geometric covers; project-original audio.",
+    "No GitHub push or basic promotion.",
+    "Portrait is an Edge viewport simulation, not physical phone verification."
+  ]
+}

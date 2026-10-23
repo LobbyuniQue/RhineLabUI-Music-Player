@@ -4,6 +4,7 @@ import ts from "typescript";
 import { buildMusicView } from "../src/music-grouping.ts";
 import { rhineView } from "../src/archive-view.ts";
 import { escapeHtml } from "../src/html.ts";
+import { MusicRevealGate } from "../src/music-reveal.ts";
 
 // Execute the production coordinator; only its DOM and scene ports are inert.
 const source = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
@@ -35,13 +36,13 @@ function fixture(initial) {
   };
   const noop = () => {};
   const titlePort = selector => ({ update({ text }) { $(selector).textContent = text; } });
-  const prefs = { musicSimplifiedModel: true }, sceneCalls = [];
+  const prefs = { musicSimplifiedModel: true }, sceneCalls = [], musicReveal = new MusicRevealGate();
   const scene = {
     setCardInteriorVisible(value) { sceneCalls.push(["interior", value]); },
     select(index, navigation) { sceneCalls.push(["select", index, navigation]); },
   };
-  const deps = { initial, rhineView, $, escapeHtml, applyRowSpacing: noop, scene, prefs,
-    musicReveal: { pending: false, holding: false }, cancelMusicArchive: noop, setMode: noop,
+  const deps = { initial, rhineView, $, escapeHtml, applyRowSpacing: noop, scene, prefs, sceneCalls,
+    musicReveal, cancelMusicArchive: noop,
     syncLibraryModeUI: noop, motionActive: () => false, requestLabelCover: noop,
     selectionTitle: titlePort("#selected-title"), songTitle: titlePort("#selected-song-title"),
     clearanceTitle: { update: noop }, categoryTitle: { update: noop },
@@ -50,6 +51,7 @@ function fixture(initial) {
   const api = Function(...Object.keys(deps), `
     let active=initial, selected=0, mode='archive', activeTab='overview', filter='全部档案', modal='search', searchQuery='';
     const view=()=>active, setActiveView=value=>active=value;
+    const setMode=value=>{sceneCalls.push(['mode',value]);mode=value;};
     const columnMemory={archive:[],music:[]}, memoryViews={archive:null,music:null};
     let fileTicks=[], fileTicksView=null, fileTicksLane=-1;
     const ARCHIVE_RESULT_PAGE_SIZE=240;
@@ -58,10 +60,11 @@ function fixture(initial) {
     return { memoryFor, applyView, select, refreshFileTicks, updateSelection, renderResults,
       more: typeof showMoreArchiveResults==='function'?showMoreArchiveResults:undefined,
       get selected(){return selected}, get active(){return active},
+      get currentMode(){return mode},
       get memory(){return columnMemory.music}, query(value){searchQuery=value;renderResults();},
       mode(value){mode=value;updateSelection();} };
   `)(...Object.values(deps));
-  return { api, list, nodes, prefs, sceneCalls, ticks: () => ticks };
+  return { api, list, nodes, prefs, musicReveal, sceneCalls, ticks: () => ticks };
 }
 let failed = 0;
 const check = (name, work) => { try { work(); console.log(`PASS ${name}`); }
@@ -103,6 +106,45 @@ check("view changes synchronize the music structure preference before selecting 
   switchTo(rhineView, true);
   f.prefs.musicSimplifiedModel = false;
   switchTo(music, true);
+});
+check("switching libraries exits completed music or archive details before selecting the new card", () => {
+  const music = buildMusicView([track("music-playing", "Album")], "album");
+  for (const [initial, next] of [[music, rhineView], [rhineView, music]]) {
+    const f = fixture(initial);
+    f.api.applyView(initial);
+    f.api.mode("detail");
+    if (initial.kind === "music") {
+      const request = f.musicReveal.begin("music-playing");
+      f.musicReveal.prepared(request);
+      assert.equal(f.musicReveal.completeFrame(true, 12), request);
+      f.musicReveal.started(request, true);
+      assert.equal(f.musicReveal.state().phase, "playing");
+      assert.equal(f.musicReveal.pending, false);
+      assert.equal(f.musicReveal.holding, false);
+    }
+    f.sceneCalls.length = 0;
+    f.api.applyView(next);
+    assert.equal(f.api.active, next);
+    assert.equal(f.api.currentMode, "archive", `${initial.kind} details must not leak into ${next.kind}`);
+    assert.deepEqual(f.sceneCalls, [
+      ["mode", "archive"], ["interior", next.kind !== "music"], ["select", f.api.selected, undefined],
+    ], "The old details must close before selecting the next library's scene card");
+    assert.equal(f.nodes.get(".archive-callout").dataset.kind, next.kind);
+  }
+});
+check("refreshing an overview within the same library does not add a mode transition", () => {
+  const music = buildMusicView([track("music-a", "Album")], "album");
+  const refreshed = buildMusicView([track("music-a", "Album"), track("music-b", "Album")], "album");
+  for (const [initial, next] of [[music, refreshed], [rhineView, rhineView]]) {
+    const f = fixture(initial);
+    f.api.applyView(initial);
+    f.sceneCalls.length = 0;
+    f.api.applyView(next);
+    assert.equal(f.api.currentMode, "archive");
+    assert.deepEqual(f.sceneCalls, [
+      ["interior", next.kind !== "music"], ["select", f.api.selected, undefined],
+    ]);
+  }
 });
 check("music callout shows song title above artist, follows selection, and restores archive text", () => {
   const songs = [

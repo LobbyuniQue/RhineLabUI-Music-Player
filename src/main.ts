@@ -44,6 +44,7 @@ import { musicSettingsMarkup } from "./music-settings";
 import { clampRowSpacing, MUSIC_ROW_SPACING_DEFAULT, ROW_SPACING_MIN } from "./row-spacing";
 import { SpectrumEnvelope, quietBands, type MusicBands } from "./archive-play-motion";
 import "./music.css";
+import "./album-detail.css";
 import {
   createMotionPreferences,
   fullMotion,
@@ -559,6 +560,9 @@ function applyView(v: ArchiveView, preferBackingId?: string) {
     if (mode === "detail") setMode("archive");
   }
   const previous = view();
+  // A library switch starts at its own overview rather than retaining the
+  // previous library's detail markup, reveal masks or album layout.
+  if (previous.kind !== v.kind && mode === "detail") setMode("archive");
   const previousGroup = previous.kind === v.kind ? previous.columns[previous.fileLocation(selected).lane] : undefined;
   setActiveView(v);
   scene?.setCardInteriorVisible(v.kind !== "music" || !prefs.musicSimplifiedModel);
@@ -1369,20 +1373,28 @@ function renderDetail() {
   const v = view();
   const r = v.records[selected];
   const isMusic = v.kind === "music";
+  $("#detail-ui").dataset.kind = v.kind;
+  $(".back-button span").textContent = isMusic ? "ALBUM OVERVIEW" : "ARCHIVE OVERVIEW";
+  $(".viewer-open").innerHTML = isMusic ? "360° 查看专辑模型 <span>↗</span>" : "360° 查看文档模型 <span>↗</span>";
   $("#object-id").textContent = "NO." + String(selected + 1).padStart(3, "0");
   const actions = isMusic
     ? `<div class="detail-actions"><button class="export-button" data-action="export-track" aria-label="导出 ${r.id} 曲目信息">EXPORT <span>↓</span></button></div>`
     : `<div class="detail-actions"><button class="solid-button" data-action="bookmark">${saved.has(r.id) ? "− REMOVE FROM SAVED" : "＋ SAVE ARCHIVE"}<span>${saved.has(r.id) ? "已收藏" : "收藏档案"}</span></button><a class="export-button" href="${assetUrl(`archives/RHINE-LAB-${r.id}.txt`)}" download="RHINE-LAB-${r.id}.txt" aria-label="导出 ${r.id} 档案">EXPORT <span>↓</span></a></div>`;
+  const heading = isMusic
+    ? `<div class="detail-kicker"><span>ALBUM EDITION</span><span>NO. ${r.id}</span></div><h2>${escapeHtml(r.title)}</h2><div class="detail-title-cn">${escapeHtml(r.en)}</div>`
+    : `<div class="detail-kicker"><span>FILE ${r.id}</span><span>${escapeHtml(r.clearance)}</span></div><h2>${escapeHtml(r.en)}</h2><div class="detail-title-cn">${escapeHtml(r.title)}<span>${escapeHtml(r.category)}</span></div>`;
+  const metadata = isMusic
+    ? `<dl class="metadata music-album-metadata"><div><dt>ALBUM / 专辑</dt><dd>${escapeHtml(r.department)}</dd></div><div><dt>YEAR / 年份</dt><dd>${escapeHtml(r.date)}</dd></div><div><dt>FORMAT / 格式</dt><dd>${escapeHtml(r.clearance)}</dd></div></dl>`
+    : `<dl class="metadata"><div><dt>DEPARTMENT / 科室</dt><dd>${escapeHtml(r.department)}</dd></div><div><dt>COLLECTION / 编目范围</dt><dd>${escapeHtml(r.date)}</dd></div><div><dt>RELATED / 相关人物</dt><dd>${escapeHtml(r.lead)}</dd></div><div><dt>STATUS / 状态</dt><dd><i></i>${r.clearance === "RESTRICTED" ? "目录访问" : "已归档 · 可读取"}</dd></div></dl>`;
   $("#detail-content").classList.toggle("music-detail", isMusic);
   $("#detail-content").innerHTML = `
-  <div class="detail-kicker"><span>FILE ${r.id}</span><span>${escapeHtml(r.clearance)}</span></div>
-  <h2>${escapeHtml(isMusic ? r.title : r.en)}</h2><div class="detail-title-cn">${escapeHtml(isMusic ? r.en : r.title)}<span>${escapeHtml(r.category)}</span></div>
+  ${heading}
   <div class="detail-rule"></div>
-  <dl class="metadata"><div><dt>${isMusic ? "ALBUM / 专辑" : "DEPARTMENT / 科室"}</dt><dd>${escapeHtml(r.department)}</dd></div><div><dt>${isMusic ? "YEAR / 年份" : "COLLECTION / 编目范围"}</dt><dd>${escapeHtml(r.date)}</dd></div><div><dt>${isMusic ? "ARTIST / 艺术家" : "RELATED / 相关人物"}</dt><dd>${escapeHtml(r.lead)}</dd></div><div><dt>STATUS / 状态</dt><dd><i></i>${r.clearance === "RESTRICTED" ? "目录访问" : "已归档 · 可读取"}</dd></div></dl>
+  ${metadata}
   <div class="detail-tabs" role="tablist"><button id="tab-overview" class="active" role="tab" aria-controls="tab-panel" aria-selected="true" data-tab="overview">01 <span>${isMusic ? "曲目信息" : "概述"}</span></button><button id="tab-notes" role="tab" aria-controls="tab-panel" aria-selected="false" data-tab="notes">02 <span>${isMusic ? "文件详情" : "研究记录"}</span></button><button id="tab-history" role="tab" aria-controls="tab-panel" aria-selected="false" data-tab="history">03 <span>访问日志</span></button><i class="tab-indicator" aria-hidden="true"></i></div>
   <div id="tab-panel" class="tab-panel" role="tabpanel">${overview()}</div>
   ${actions}
-  <div class="detail-footnote">${r.source ? `<a href="${escapeHtml(r.source)}" target="_blank" rel="noopener">设定参考 ↗</a>` : "<i></i>"}<span>${String(selected + 1).padStart(3, "0")} / ${String(v.records.length).padStart(3, "0")}</span></div>`;
+  <div class="detail-footnote">${isMusic ? `<span>COLLECTION / ${escapeHtml(r.category)}</span>` : r.source ? `<a href="${escapeHtml(r.source)}" target="_blank" rel="noopener">设定参考 ↗</a>` : "<i></i>"}<span>${String(selected + 1).padStart(3, "0")} / ${String(v.records.length).padStart(3, "0")}</span></div>`;
   $("#detail-content").setAttribute("tabindex", "-1");
   if (!isMusic) $('[data-action="bookmark"]').setAttribute("aria-pressed", String(saved.has(r.id)));
   documentDecryption.reset($("#detail-content"), musicReveal.immediate || (!musicReveal.blocking &&

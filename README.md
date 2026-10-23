@@ -8,6 +8,8 @@ RhineLabUI 本地扩展工程，以三维档案阵列承载本地曲库，把歌
 
 当前基线为 **basic / 0.1.5**（2026-10-20）。它包含歌单更新，以及随后完成的歌名排序与标题显示、统一检索入口、音乐面板布局改进。GitHub 默认分支使用 [`basic`](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/tree/basic)，本次固定快照为 [`basic-0.1.5-20261020`](https://github.com/LobbyuniQue/RhineLabUI-Music-Player/tree/basic-0.1.5-20261020)。
 
+本地 `experimental` 正在试验 **简化音乐档案**（2026-10-23）：音乐模式隐藏精细内构与雕刻，保留外壳、底板、封面和标签，覆盖选中卡片、归位副本及 360° 查看器。设置 → 本地音乐中的 `MUSIC MODEL` 开关可恢复完整模型，切回档案库始终显示完整结构。该实验默认开启，软件版本仍为 0.1.5，尚未合入 `basic`。范围和实际验证见 [音乐模型实验](verification/MUSIC-MODEL-EXPERIMENT.md)。
+
 接下来的改动先在 `experimental` 或 `experiment/<主题>` 分支进行，完成验证与实际效果验收后，通过 Pull Request 合入 `basic`。`basic` 是可继续更新的基线分支，固定标签用于随时回到本次状态；`main` 保留既有历史。工作约定见 [基线与实验开发](docs/DEVELOPMENT.md)，本次收录范围见 [basic 基线说明](docs/releases/basic-0.1.5-20261020.md)。
 
 当前版本为 **0.1.5**，新增歌单与文件夹预设，每个歌单最多 **1000 首**。超过上限时由用户选择自动分卷或自行整理；切换只索引当前歌单，音频仍按点击加载。浏览器与 VLC 共用这一规则，并修复换库、重扫、标签解析及查看器的边界问题。完整动画继续等待揭示结束帧起播，简化动画就绪即播放。详见 [0.1.5 更新说明](docs/releases/版本说明-0.1.5.md)。首次 GitHub 上传为 **0.1.1**，此前快照为 **0.0.1–0.0.10**；详细关系见 [版本记录](docs/releases/README.md)。

@@ -17,6 +17,7 @@ import { SMAAPass } from "three/addons/postprocessing/SMAAPass.js";
 import { normalizeQuality, type RenderQuality } from "./render-quality";
 import { applyTextureQuality, resizeQuality } from "./quality-renderer";
 import { CardAppearance } from "./appearance";
+import { ARRAY_CARD_SURFACES, setCardInteriorVisible } from "./card-structure";
 import { configureInternalOptics } from "./internal-optics";
 import { DecryptionController } from "./decryption";
 import { activeView } from "./archive-view";
@@ -99,6 +100,12 @@ export class ArchiveScene {
   private subduedIndex = { value: 0 };
   private selectedIndexOnly = false;
   private superPerformance = false;
+  private cardInteriorVisible = true;
+  setCardInteriorVisible(visible: boolean) {
+    this.cardInteriorVisible = visible;
+    setCardInteriorVisible(this.model, visible);
+    for (const outgoing of this.outgoing) setCardInteriorVisible(outgoing.group, visible);
+  }
   setSuperPerformance(enabled: boolean) {
     if (this.superPerformance === enabled) return;
     this.superPerformance = enabled;
@@ -431,15 +438,7 @@ export class ArchiveScene {
       this.model.add(selectedMesh);
       // Only the shell, edge and fasteners remain visible within tightly packed rows.
       // Keep sub-millimetre optical/typographic geometry on the extracted cassette.
-      if (
-        ![
-          "Frosted_Polymer",
-          "Ivory_Edges",
-          "Titanium_Fasteners",
-          "Index_Inlay",
-          "Optical_Diffuser",
-        ].includes(name)
-      ) {
+      if (!ARRAY_CARD_SURFACES.has(name)) {
         this.appearance.register(name, mat);
         continue;
       }
@@ -557,6 +556,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     label.position.set(-1.36, 3.04, 0.255);
     this.model.add(label);
     this.appearance.prepare(this.model);
+    setCardInteriorVisible(this.model, this.cardInteriorVisible);
     this.appearance.apply(this.model, 0);
     this.drawLabel(0);
     this.scene.add(this.model);
@@ -620,6 +620,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     label.userData.themeAmount.value = this.themeAmount;
     model.add(label);
     meshes.push(label);
+    setCardInteriorVisible(model, this.cardInteriorVisible);
     return {
       model,
       setClarity: (value: number) => this.appearance.setClarity(model, value),
@@ -2002,6 +2003,8 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
       renderedFrames: this.renderedFrames,
       reusedFrames: this.reusedFrames,
       superPerformance: this.superPerformance,
+      cardInteriorVisible: this.cardInteriorVisible,
+      hiddenModelMeshes: this.model.children.filter(child => !child.visible).length,
       presentation: this.presence,
       triangles: this.renderer.info.render.triangles,
       archiveCount: this.drawnCells.length,
@@ -2063,6 +2066,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
       fogFar: (this.scene.fog as THREE.Fog).far,
       returningAppearance: this.outgoing.map((o) => ({
         slot: o.slot,
+        hiddenMeshes: o.group.children.filter(child => !child.visible).length,
         clarity: o.group.children.find(child => child.userData.surface === "Frosted_Polymer")?.userData.glassClarity?.value,
         cell: { ...o.cell },
         lift: o.lift.value,

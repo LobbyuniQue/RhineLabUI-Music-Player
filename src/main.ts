@@ -215,7 +215,7 @@ function readLocal<T>(key: string, fallback: T): T {
   }
 }
 const saved = new Set<string>(readLocal<string[]>("rhine-saved", []));
-const storedPrefs = readLocal<Partial<{ sound: boolean; music: boolean; soundVolume: number; musicVolume: number; localMusicVolume: number; musicReactive: boolean; musicRhythm: "legacy" | "wave" | "lift" | "pulse" | "ripple" | "groove" | "shimmer"; musicEngine: "browser" | "vlc"; vlcPort: number; vlcToken: string; libraryMode: "archive" | "music"; musicGrouping: MusicGrouping; reduced: boolean; quality: boolean; rendering: RenderQuality; superPerformance: boolean; colorTheme: "light" | "dark"; motion: StoredMotion; motionPreset: MotionPreset; musicRowSpacing: number }>>("rhine-settings", {});
+const storedPrefs = readLocal<Partial<{ sound: boolean; music: boolean; soundVolume: number; musicVolume: number; localMusicVolume: number; musicReactive: boolean; musicRhythm: "legacy" | "wave" | "lift" | "pulse" | "ripple" | "groove" | "shimmer"; musicEngine: "browser" | "vlc"; vlcPort: number; vlcToken: string; libraryMode: "archive" | "music"; musicGrouping: MusicGrouping; reduced: boolean; quality: boolean; rendering: RenderQuality; superPerformance: boolean; colorTheme: "light" | "dark"; motion: StoredMotion; motionPreset: MotionPreset; musicRowSpacing: number; musicSimplifiedModel: boolean }>>("rhine-settings", {});
 const initialMotion = createMotionPreferences(
   storedPrefs.motion,
   storedPrefs.reduced ?? (storedPrefs.motion === undefined
@@ -241,6 +241,7 @@ const prefs = {
   libraryMode: storedPrefs.libraryMode === "music" ? ("music" as const) : ("archive" as const),
   musicGrouping: storedPrefs.musicGrouping === "artist" || storedPrefs.musicGrouping === "letter" ? storedPrefs.musicGrouping : ("album" as const),
   musicRowSpacing: clampRowSpacing(storedPrefs.musicRowSpacing ?? MUSIC_ROW_SPACING_DEFAULT),
+  musicSimplifiedModel: storedPrefs.musicSimplifiedModel !== false,
   motion: initialMotion,
   motionPreset: initialMotionPreset,
   quality: storedPrefs.quality ?? true,
@@ -560,6 +561,7 @@ function applyView(v: ArchiveView, preferBackingId?: string) {
   const previous = view();
   const previousGroup = previous.kind === v.kind ? previous.columns[previous.fileLocation(selected).lane] : undefined;
   setActiveView(v);
+  scene?.setCardInteriorVisible(v.kind !== "music" || !prefs.musicSimplifiedModel);
   applyRowSpacing();
   const mem = memoryFor(v);
   const preferred = preferBackingId ? v.records.findIndex((_, i) => v.backingId(i) === preferBackingId) : -1;
@@ -877,6 +879,7 @@ function musicSettingsState() {
     rhythm: prefs.musicRhythm,
     grouping: prefs.musicGrouping,
     rowSpacing: prefs.musicRowSpacing,
+    simplifiedModel: prefs.musicSimplifiedModel,
   };
 }
 function refreshMusicSettings() {
@@ -985,6 +988,7 @@ function superPerformanceEnabled() { return isWallpaper ? wallpaperHost()?.prope
 function effectiveRenderQuality() { return superPerformanceEnabled() ? superPerformanceQuality : prefs.rendering; }
 function savePrefs() {
   saveAudioPrefs();
+  scene?.setCardInteriorVisible(view().kind !== "music" || !prefs.musicSimplifiedModel);
   if (!motionActive("rollingText")) rollingTitles.forEach(title => title.finish());
   if (!motionActive("rollingNumbers")) [fileCounter, columnCounter, selectedCode, hoverCode].forEach(counter => counter.finish());
   if (!motionActive("surfaceTransitions")) {
@@ -1610,6 +1614,12 @@ document.addEventListener("input", (e) => {
 });
 document.addEventListener("change", (e) => {
   const el = e.target as HTMLInputElement;
+  if (el.dataset.musicSimplifiedModel !== undefined) {
+    prefs.musicSimplifiedModel = el.checked;
+    savePrefs();
+    audio.play("confirm");
+    return;
+  }
   if (el.dataset.musicReactive !== undefined) {
     prefs.musicReactive = el.checked;
     savePrefs();
@@ -2045,6 +2055,7 @@ function frame(ms: number) {
   requestAnimationFrame(frame);
 }
 function bindScene(scene: ArchiveScene, cell?: { lane: number; row: number }) {
+    scene.setCardInteriorVisible(view().kind !== "music" || !prefs.musicSimplifiedModel);
     scene.setDecryptionHeld(musicReveal.holding);
     scene.setRowSpacing(rowSpacingForView(), true);
     scene.setCoverProvider(coverTileFor, coverAtlas.texture, prepareCoverFrame);

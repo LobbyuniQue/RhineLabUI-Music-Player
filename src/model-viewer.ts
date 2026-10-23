@@ -111,7 +111,7 @@ export class ModelViewer {
         <span class="viewer-index">360<span>°</span></span>
       </header>
       <div class="viewer-surface" role="group" aria-label="玻璃模式"><button data-viewer="clear" aria-pressed="true">清晰</button><button data-viewer="frosted" aria-pressed="false">磨砂</button></div>
-      <aside class="viewer-parts" aria-label="模型装配结构"><div>ASSEMBLY / 装配结构</div>${PARTS.map((p, i) => `<p><span>${String(i + 1).padStart(2, "0")}</span><strong>${p.label}</strong><small>${p.en}</small></p>`).join("")}</aside>
+      <aside class="viewer-parts" aria-label="模型装配结构"><div>ASSEMBLY / 装配结构</div>${PARTS.map((p, i) => `<p data-viewer-part="${p.id}"><span>${String(i + 1).padStart(2, "0")}</span><strong>${p.label}</strong><small>${p.en}</small></p>`).join("")}</aside>
       <div class="viewer-loading" role="status"><span>正在载入模型…</span><button data-viewer="retry" hidden>重新载入 ↗</button></div>
       <footer class="viewer-footer">
         <div class="viewer-help"><span>拖动旋转</span><span>↑ ↓ ← → 平移</span><span>滚轮缩放</span></div>
@@ -281,6 +281,10 @@ export class ModelViewer {
         group?.add(child);
       }
       for (const group of this.groups.values()) source.model.add(group);
+      for (const part of PARTS) {
+        this.root.querySelector<HTMLElement>(`[data-viewer-part="${part.id}"]`)!.hidden =
+          !this.groups.get(part.id)!.children.some(child => child.visible);
+      }
       source.model.position.set(0, -1.85, 0);
       this.scene.add(source.model);
       applyTextureQuality(source.model, this.renderer, this.quality);

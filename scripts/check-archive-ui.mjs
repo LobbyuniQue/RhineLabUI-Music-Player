@@ -35,7 +35,12 @@ function fixture(initial) {
   };
   const noop = () => {};
   const titlePort = selector => ({ update({ text }) { $(selector).textContent = text; } });
-  const deps = { initial, rhineView, $, escapeHtml, applyRowSpacing: noop, scene: null,
+  const prefs = { musicSimplifiedModel: true }, sceneCalls = [];
+  const scene = {
+    setCardInteriorVisible(value) { sceneCalls.push(["interior", value]); },
+    select(index, navigation) { sceneCalls.push(["select", index, navigation]); },
+  };
+  const deps = { initial, rhineView, $, escapeHtml, applyRowSpacing: noop, scene, prefs,
     musicReveal: { pending: false, holding: false }, cancelMusicArchive: noop, setMode: noop,
     syncLibraryModeUI: noop, motionActive: () => false, requestLabelCover: noop,
     selectionTitle: titlePort("#selected-title"), songTitle: titlePort("#selected-song-title"),
@@ -56,7 +61,7 @@ function fixture(initial) {
       get memory(){return columnMemory.music}, query(value){searchQuery=value;renderResults();},
       mode(value){mode=value;updateSelection();} };
   `)(...Object.values(deps));
-  return { api, list, nodes, ticks: () => ticks };
+  return { api, list, nodes, prefs, sceneCalls, ticks: () => ticks };
 }
 let failed = 0;
 const check = (name, work) => { try { work(); console.log(`PASS ${name}`); }
@@ -82,6 +87,22 @@ check("unified index selects the active library while explicit music access stay
   archive.open("music"); assert.equal(archive.kind, "music");
   const notReady = fixture("music", false);
   notReady.open("search"); assert.equal(notReady.kind, "settings");
+});
+check("view changes synchronize the music structure preference before selecting the scene card", () => {
+  const music = buildMusicView([track("music-a", "Album")], "album");
+  const f = fixture(rhineView);
+  const switchTo = (view, expectedInterior) => {
+    f.sceneCalls.length = 0;
+    f.api.applyView(view);
+    assert.equal(f.api.active, view);
+    assert.deepEqual(f.sceneCalls, [
+      ["interior", expectedInterior], ["select", f.api.selected, undefined],
+    ]);
+  };
+  switchTo(music, false);
+  switchTo(rhineView, true);
+  f.prefs.musicSimplifiedModel = false;
+  switchTo(music, true);
 });
 check("music callout shows song title above artist, follows selection, and restores archive text", () => {
   const songs = [

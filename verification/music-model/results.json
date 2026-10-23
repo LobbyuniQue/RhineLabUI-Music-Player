@@ -1,0 +1,185 @@
+{
+  "date": "2026-10-23",
+  "build": "a80f7785f1164cce",
+  "baseline": "46e0c0374f05855ca53921db471e4aa7fe166478",
+  "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 5070 Laptop GPU (0x00002D58) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  "viewport": {
+    "width": 1280,
+    "height": 720,
+    "dpr": 1
+  },
+  "quality": {
+    "ratio": 1,
+    "width": 1280,
+    "height": 720,
+    "limited": false,
+    "antialias": "off",
+    "transmission": 1,
+    "anisotropy": 16,
+    "superPerformance": false,
+    "aoSamples": 32,
+    "aoWidth": 1280,
+    "aoHeight": 720,
+    "shadows": 2048,
+    "depthOfField": 100
+  },
+  "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0",
+  "runs": 12,
+  "frames": 288,
+  "comparableMotion": true,
+  "summary": [
+    {
+      "name": "array",
+      "full": {
+        "simplified": false,
+        "frames": 48,
+        "cpu": 1.2999999970197678,
+        "gpu": 3.535616,
+        "drawCalls": 75,
+        "triangles": 4185945,
+        "maxReturning": 0,
+        "perRun": [
+          {
+            "order": 0,
+            "gpu": 3.54016,
+            "calls": 75,
+            "triangles": 4185945
+          },
+          {
+            "order": 1,
+            "gpu": 3.535616,
+            "calls": 75,
+            "triangles": 4185945
+          }
+        ]
+      },
+      "simplified": {
+        "simplified": true,
+        "frames": 48,
+        "cpu": 1.1000000089406967,
+        "gpu": 3.859872,
+        "drawCalls": 45,
+        "triangles": 3952071,
+        "maxReturning": 0,
+        "perRun": [
+          {
+            "order": 0,
+            "gpu": 3.758368,
+            "calls": 45,
+            "triangles": 3952071
+          },
+          {
+            "order": 1,
+            "gpu": 3.985792,
+            "calls": 45,
+            "triangles": 3952071
+          }
+        ]
+      },
+      "gpuReduction": -9.17113170661068,
+      "triangleReduction": 5.5871254877930765
+    },
+    {
+      "name": "detail",
+      "full": {
+        "simplified": false,
+        "frames": 48,
+        "cpu": 0.800000011920929,
+        "gpu": 3.796608,
+        "drawCalls": 75,
+        "triangles": 2216593,
+        "maxReturning": 0,
+        "perRun": [
+          {
+            "order": 0,
+            "gpu": 3.854592,
+            "calls": 75,
+            "triangles": 2216593
+          },
+          {
+            "order": 1,
+            "gpu": 3.778272,
+            "calls": 75,
+            "triangles": 2216593
+          }
+        ]
+      },
+      "simplified": {
+        "simplified": true,
+        "frames": 48,
+        "cpu": 0.6000000089406967,
+        "gpu": 3.562112,
+        "drawCalls": 45,
+        "triangles": 1982719,
+        "maxReturning": 0,
+        "perRun": [
+          {
+            "order": 0,
+            "gpu": 3.671072,
+            "calls": 45,
+            "triangles": 1982719
+          },
+          {
+            "order": 1,
+            "gpu": 3.540256,
+            "calls": 45,
+            "triangles": 1982719
+          }
+        ]
+      },
+      "gpuReduction": 6.176460672263239,
+      "triangleReduction": 10.551057411080878
+    },
+    {
+      "name": "navigate",
+      "full": {
+        "simplified": false,
+        "frames": 48,
+        "cpu": 1.4000000059604645,
+        "gpu": 5.154944,
+        "drawCalls": 220,
+        "triangles": 4044699,
+        "maxReturning": 4,
+        "perRun": [
+          {
+            "order": 0,
+            "gpu": 5.090592,
+            "calls": 220,
+            "triangles": 4044699
+          },
+          {
+            "order": 1,
+            "gpu": 5.278752,
+            "calls": 220,
+            "triangles": 4044699
+          }
+        ]
+      },
+      "simplified": {
+        "simplified": true,
+        "frames": 48,
+        "cpu": 1.2000000029802322,
+        "gpu": 5.038464,
+        "drawCalls": 100,
+        "triangles": 3109203,
+        "maxReturning": 4,
+        "perRun": [
+          {
+            "order": 0,
+            "gpu": 4.952928,
+            "calls": 100,
+            "triangles": 3109203
+          },
+          {
+            "order": 1,
+            "gpu": 5.155488,
+            "calls": 100,
+            "triangles": 3109203
+          }
+        ]
+      },
+      "gpuReduction": 2.2595783775730682,
+      "triangleReduction": 23.128939879086186
+    }
+  ]
+}

@@ -27,6 +27,7 @@ export type MusicSettingsState = {
   grouping: MusicGrouping;
   /** Vertical spacing between music archive cards. */
   rowSpacing: number;
+  simplifiedModel: boolean;
 };
 
 export function musicSettingsMarkup(library: MusicLibrary, state: MusicSettingsState) {
@@ -95,6 +96,11 @@ export function musicSettingsMarkup(library: MusicLibrary, state: MusicSettingsS
         )
         .join("")}
     </div>
+  </div>
+  <div class="music-settings-item">
+    <strong>MUSIC MODEL</strong>
+    <span>简化音乐档案 · 隐藏精细内构与雕刻，保留外壳、封面和标签；只作用于音乐库</span>
+    <label class="music-settings-toggle"><input type="checkbox" data-music-simplified-model ${state.simplifiedModel ? "checked" : ""}/><i class="toggle"></i><span>简化音乐档案（实验）</span></label>
   </div>
   <div class="music-settings-item">
     <strong>ARCHIVE GROUPING</strong>

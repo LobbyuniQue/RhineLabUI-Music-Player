@@ -26,14 +26,18 @@ for(const [width,height] of [[1920,1080],[2560,1080],[3840,1080],[1400,1050],[10
     }
   }
   const extra=visibility.update(camera,distance+25,0,0,true).filter(c=>visibility.intersects((c.lane-2)*5.2,-4.6,(c.row-15.5)*.62));
-  assert.ok(extra.length>=selected.length);
+  const extraKeys = new Set(extra.map(c => `${c.lane}:${c.row}`));
+  for (const key of keys) assert.ok(extraKeys.has(key), 'Extra shadow coverage includes the normal view');
   const shifted=visibility.update(camera,distance+25,52,-6.2,false).filter(c=>visibility.intersects((c.lane-2)*5.2-52,-4.6,(c.row-15.5)*.62-6.2));
   assert.ok(Math.abs(shifted.length-selected.length)<=2,'Whole-cell track movement preserves view coverage within edge tolerance');
-  // Visibility candidates use the fixed dense baseline. They must still cover
-  // cards rendered at every supported music row spacing without mode-specific
-  // visibility recalculation.
-  for (const spacing of [.62, 4.05, 8]) {
-    const spacingCandidates = visibility.update(camera,distance+25,0,0,false);
+  // The slider moves continuously; intermediate spacings also change the footprint
+  // when the camera and both track offsets stay still.
+  let previousCandidates;
+  for (const spacing of [.62, 2.731, 4.05, 8]) {
+    const spacingCandidates = visibility.update(camera,distance+25,0,0,false,spacing);
+    assert.notEqual(spacingCandidates, previousCandidates, 'Changing spacing invalidates the cached cells');
+    assert.equal(visibility.update(camera,distance+25,0,0,false,spacing), spacingCandidates);
+    previousCandidates = spacingCandidates;
     const spacingKeys = new Set(spacingCandidates.map(c => `${c.lane}:${c.row}`));
     const visible = spacingCandidates.filter(c => visibility.intersects((c.lane-2)*5.2,-4.6,(c.row-15.5)*spacing));
     const keys = new Set(visible.map(c => `${c.lane}:${c.row}`));
@@ -51,4 +55,32 @@ for(const [width,height] of [[1920,1080],[2560,1080],[3840,1080],[1400,1050],[10
   summaries.push({width,height,detail,drawn:selected.length,candidates:candidates.length,extra:extra.length});
 }
 assert.ok(summaries[4].drawn>summaries[0].drawn,'Wider view increases archive count');
-console.table(summaries);console.log('Fixed dense visibility coverage, adjustable row spacing, extreme heights, unique picking cells, overscan and track translation passed.');
+console.table(summaries);
+
+// A 1000-song group, with extra rows at both ends for looped browsing.
+// Translating the rail by whole rows must translate the very same candidates,
+// including the overscan retained for neighbouring shadow casters.
+const camera = new THREE.PerspectiveCamera(3, 1920 / 1080, 5, 300);
+camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(7.33 / 280));
+camera.position.set(-.81, .326, .487).normalize().multiplyScalar(140);
+camera.lookAt(0, 0, 0);
+camera.updateProjectionMatrix();
+camera.updateMatrixWorld();
+const longPlaylist = [];
+for (const spacing of [.62, 2.731, 4.05, 8]) for (const extra of [false, true]) {
+  let reference;
+  // A group starts at row 12, so its 1000th track occupies row 1011.
+  for (const row of [12, 500, 1000, 1011, -2049, 4097]) {
+    const trackZ = -2.17 - (row - 15.5) * spacing;
+    const candidates = visibility.update(camera, 165, 0, trackZ, extra, spacing);
+    const relativeKeys = candidates.map(cell => `${cell.lane}:${cell.row - row}`);
+    if (reference) assert.deepEqual(relativeKeys, reference, `Unbounded candidate growth or missing cells at row ${row}, spacing ${spacing}`);
+    else reference = relativeKeys;
+    if (!extra && row === 1000) {
+      const visible = candidates.filter(c => visibility.intersects((c.lane - 2) * 5.2, -4.6, trackZ + (c.row - 15.5) * spacing));
+      longPlaylist.push({ spacing, row, candidates: candidates.length, drawn: visible.length });
+    }
+  }
+}
+console.table(longPlaylist);
+console.log('Visible cards, lift extremes, shadow overscan, spacing interpolation and bounded looped traversal passed.');

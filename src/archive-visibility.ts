@@ -1,8 +1,8 @@
 import * as THREE from 'three';
-import { COLUMN_SPACING, type ArchiveCell } from './archive-loop.ts';
-import { ROW_SPACING_MAX, ROW_SPACING_MIN } from './row-spacing.ts';
+import { COLUMN_SPACING, ROW_SPACING, type ArchiveCell } from './archive-loop.ts';
 
 const edges = [[0,1],[0,2],[0,4],[1,3],[1,5],[2,3],[2,6],[3,7],[4,5],[4,6],[5,7],[6,7]];
+const halfWidth = 2.8, halfDepth = 1.2;
 /** A view-aligned pool, clipped to the height slab the array can occupy. */
 export class ArchiveVisibility {
   private camera = new THREE.PerspectiveCamera();
@@ -12,9 +12,9 @@ export class ArchiveVisibility {
   candidates = 0;
   private previous: number[] = [];
   private cachedCells: ArchiveCell[] = [];
-  update(source: THREE.PerspectiveCamera, far: number, trackX: number, trackZ: number, extra: boolean): ArchiveCell[] {
+  update(source: THREE.PerspectiveCamera, far: number, trackX: number, trackZ: number, extra: boolean, rowSpacing = ROW_SPACING): ArchiveCell[] {
     const inputs = [...source.projectionMatrix.elements, ...source.matrixWorldInverse.elements,
-      source.near, source.far, far, trackX, trackZ, Number(extra)];
+      source.near, source.far, far, trackX, trackZ, Number(extra), rowSpacing];
     if (inputs.every((value, i) => value === this.previous[i])) return this.cachedCells;
     this.previous = inputs;
     this.camera.copy(source, false);
@@ -40,23 +40,18 @@ export class ArchiveVisibility {
       if(t>=0&&t<=1)slab.expandByPoint(start.clone().lerp(end,t));
     }
     if(slab.isEmpty()) { this.candidates=0; return this.cachedCells = []; }
-    const minLane=Math.floor((slab.min.x-2.8+trackX)/COLUMN_SPACING+2)-1;
-    const maxLane=Math.ceil((slab.max.x+2.8+trackX)/COLUMN_SPACING+2)+1;
-    // Build a mode-independent candidate superset across the supported row
-    // spacing range. Each row's box spans its possible z positions; the active
-    // render spacing is applied later by intersects(), so changing the slider
-    // never requires a second visibility algorithm.
-    const maxOffset = Math.max(Math.abs(slab.min.z - trackZ), Math.abs(slab.max.z - trackZ)) / ROW_SPACING_MIN + 2;
-    const minRow = Math.floor(15.5 - maxOffset);
-    const maxRow = Math.ceil(15.5 + maxOffset);
+    const minLane = Math.floor((slab.min.x - halfWidth + trackX) / COLUMN_SPACING + 2) - 1;
+    const maxLane = Math.ceil((slab.max.x + halfWidth + trackX) / COLUMN_SPACING + 2) + 1;
+    // Invert this frame's world-z transform. Travelling moves the interval
+    // along the lattice without growing the number of rows we enumerate.
+    const minRow = Math.floor((slab.min.z - halfDepth - trackZ) / rowSpacing + 15.5);
+    const maxRow = Math.ceil((slab.max.z + halfDepth - trackZ) / rowSpacing + 15.5);
     const cells: ArchiveCell[]=[];
     for(let lane=minLane;lane<=maxLane;lane++)for(let row=minRow;row<=maxRow;row++) {
       const x=(lane-2)*COLUMN_SPACING-trackX;
-      const offset = row - 15.5;
-      const z0 = trackZ + offset * ROW_SPACING_MIN;
-      const z1 = trackZ + offset * ROW_SPACING_MAX;
-      this.box.min.set(x-2.8,bottom,Math.min(z0, z1)-1.2);
-      this.box.max.set(x+2.8,top,Math.max(z0, z1)+1.2);
+      const z = trackZ + (row - 15.5) * rowSpacing;
+      this.box.min.set(x - halfWidth, bottom, z - halfDepth);
+      this.box.max.set(x + halfWidth, top, z + halfDepth);
       if(this.frustum.intersectsBox(this.box))cells.push({lane,row});
     }
     this.candidates=cells.length;
@@ -65,8 +60,8 @@ export class ArchiveVisibility {
   intersects(x: number, y: number, z: number) {
     // Conservative over the subtle x-axis lean and normal wave amplitude.
     // Additional depth keeps adjacent offscreen shadow casters in the set.
-    this.box.min.set(x-2.8,y-.3,z-1.2);
-    this.box.max.set(x+2.8,y+4.1,z+1.2);
+    this.box.min.set(x - halfWidth, y - .3, z - halfDepth);
+    this.box.max.set(x + halfWidth, y + 4.1, z + halfDepth);
     return this.frustum.intersectsBox(this.box);
   }
 }

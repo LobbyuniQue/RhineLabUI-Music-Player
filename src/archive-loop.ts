@@ -1,6 +1,8 @@
 import { activeView } from "./archive-view.ts";
 
 export type ArchiveCell = { lane: number; row: number };
+/** A local occurrence together with the logical origin of its render frame. */
+export type ArchivePosition = { cell: ArchiveCell; origin: ArchiveCell };
 export type ArchiveNavigation =
   { axis: "row" | "lane"; direction: number } | { cell: ArchiveCell };
 
@@ -24,23 +26,28 @@ export function nearestOccurrence(
   return value + Math.floor((center - value + period / 2) / period) * period;
 }
 
-export function fileAtCell({ lane, row }: ArchiveCell) {
+const zeroOrigin: Readonly<ArchiveCell> = { lane: 0, row: 0 };
+
+// Geometry and pointer hits use bounded scene coordinates. Catalogue periods
+// apply to logical coordinates (local cell + origin), separately for each lane.
+export function fileAtCell({ lane, row }: ArchiveCell, origin = zeroOrigin) {
   const view = activeView();
-  const files = view.columnFiles(wrap(lane, view.columns.length));
+  const files = view.columnFiles(wrap(lane + origin.lane, view.columns.length));
   if (!files.length) return 0;
-  return files[wrap(row - 12, files.length)];
+  return files[wrap(row + origin.row - 12, files.length)];
 }
 
 export function selectionCell(
   index: number,
   current: ArchiveCell,
   navigation?: ArchiveNavigation,
+  origin = zeroOrigin,
 ): ArchiveCell {
   if (navigation && "cell" in navigation) return { ...navigation.cell };
   const view = activeView();
   const next = view.fileLocation(index);
   const row = nearestOccurrence(
-    next.row,
+    next.row - origin.row,
     current.row,
     view.columnFiles(next.lane).length || 1,
   );
@@ -51,7 +58,7 @@ export function selectionCell(
     lane:
       navigation?.axis === "lane"
         ? current.lane + navigation.direction
-        : nearestOccurrence(next.lane, current.lane, view.columns.length),
+        : nearestOccurrence(next.lane - origin.lane, current.lane, view.columns.length),
     row,
   };
 }

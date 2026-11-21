@@ -107,6 +107,7 @@ function bridgeHarness(signals = AbortSignal) {
   const calls = [];
   const diagnostics = [];
   const context = createContext({
+    args: { aout: "dummy" },
     VlcOperationQueue, VlcStatusReader, waitWithSignal, AbortSignal: signals, URL, URLSearchParams, Date, setTimeout,
     console: { ...console, error: (...values) => diagnostics.push(values.join(" ")) },
     fetch: (url, options) => {
@@ -154,6 +155,7 @@ test("real bridge polling skips pending controls and an internal receipt reads a
   h.calls[2].request.resolve(raw("stopped"));
   const receipt = await operation;
   assert.equal(receipt.state, "stopped");
+  assert.equal(receipt.dummyAudioOutput, true);
   assert.equal(receipt.currentId, null);
   await flush();
   assert.equal(h.calls.length, 4, "external status starts only after operation completes");

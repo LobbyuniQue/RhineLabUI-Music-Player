@@ -35,6 +35,7 @@ import {
   COLUMN_SPACING,
   ROW_SPACING,
   type ArchiveCell,
+  type ArchivePosition,
   type ArchiveNavigation,
 } from "./archive-loop";
 import { labelMarkSvg } from "./brand";
@@ -741,16 +742,16 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     );
   }
   private rebaseCoordinates() {
-    // Periodically reduce the logical coordinates while preserving every
-    // relative position, spring velocity, ripple and idle phase.
+    // Move the local frame near its initial centre. The logical cell stays
+    // fixed because the catalogue origin moves by the opposite displacement.
     const shift = {
       lane:
         Math.abs(this.selectedCell.lane) > 2048
-          ? Math.round((this.selectedCell.lane - 2) / 5) * 5
+          ? this.selectedCell.lane - 2
           : 0,
       row:
         Math.abs(this.selectedCell.row) > 2048
-          ? Math.floor((this.selectedCell.row - 12) / 8) * 8
+          ? this.selectedCell.row - 12
           : 0,
     };
     if (!shift.lane && !shift.row) return;
@@ -777,6 +778,17 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
       this.pendingPulse.row -= shift.row;
     }
   }
+  selectionPosition(): ArchivePosition {
+    return { cell: { ...this.selectedCell }, origin: { ...this.coordinateOrigin } };
+  }
+  restoreSelection(index: number, position: ArchivePosition) {
+    if (fileAtCell(position.cell, position.origin) !== index) {
+      this.select(index);
+      return;
+    }
+    this.coordinateOrigin = { ...position.origin };
+    this.select(index, { cell: position.cell });
+  }
   select(index: number, navigation?: ArchiveNavigation) {
     if (!this.navigatingDrag) this.cancelPointer();
     this.setHover(null);
@@ -784,7 +796,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     const next = fileLocation(index).slot;
     const canonical = fileLocation(index);
     const cell = this.looping
-      ? selectionCell(index, this.selectedCell, navigation)
+      ? selectionCell(index, this.selectedCell, navigation, this.coordinateOrigin)
       : { lane: canonical.lane, row: canonical.row };
     const changed = !sameCell(cell, this.selectedCell);
     if (this.looping && changed && this.loaded && this.lift.value > 0.0001) {
@@ -1018,7 +1030,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     )
       return;
     this.hoverCell = cell ? { ...cell } : null;
-    this.onHover?.(cell ? fileAtCell(cell) : null);
+    this.onHover?.(cell ? fileAtCell(cell, this.coordinateOrigin) : null);
   }
   private pickCell(x: number, y: number) {
     const r = this.renderer.domElement.getBoundingClientRect();
@@ -1090,7 +1102,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
           lane: Math.round(from.lane + (goal.lane - from.lane) * i / steps),
           row: Math.round(from.row + (goal.row - from.row) * i / steps),
         };
-        if (!sameCell(cell, this.selectedCell)) this.onSelect?.(fileAtCell(cell), cell);
+        if (!sameCell(cell, this.selectedCell)) this.onSelect?.(fileAtCell(cell, this.coordinateOrigin), cell);
       }
     } finally {
       this.navigatingDrag = false;
@@ -1255,7 +1267,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
           }
         } else if (!moved) {
           const cell = this.pickCell(e.clientX, e.clientY);
-          if (cell) this.onSelect?.(fileAtCell(cell), cell);
+          if (cell) this.onSelect?.(fileAtCell(cell, this.coordinateOrigin), cell);
         }
       }
       reset();
@@ -1816,7 +1828,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     // is final for this frame. Picking uses the same packed index-to-cell map.
     const fixed = (Boolean(cinematic) || !this.looping) && !responsiveOpening;
     this.cells = fixed ? Array.from({ length: 160 }, (_, i) => poolCell(i))
-      : this.visibility.update(this.camera, fog.far, trackX, entryZ + this.rail.value, this.extraCoverage);
+      : this.visibility.update(this.camera, fog.far, trackX, entryZ + this.rail.value, this.extraCoverage, this.rowSpacing());
     const hidden = new Set(this.outgoing.map(o => cellKey(o.cell)));
     hidden.add(cellKey(this.selectedCell));
     this.drawnCells = [];
@@ -1840,7 +1852,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
     // Under unusually dense/wide views the atlas can run out of simultaneous
     // tiles. Give cards near the camera's focus priority over the outer margin.
     const coverPriority = coversVisible ? drawable.map(({ cell, x, y, z }) => ({
-      index: fileAtCell(cell),
+      index: fileAtCell(cell, this.coordinateOrigin),
       distance: (x - this.cameraAim.x) ** 2 + (y + 1.85 - this.cameraAim.y) ** 2 + (z - this.cameraAim.z) ** 2,
     })).sort((a, b) => a.distance - b.distance).map(({ index }) => index) : [];
     this.prepareCoverFrame?.(coverPriority);
@@ -1850,7 +1862,7 @@ if (rhineCoverEnabled > 0.5 && rhineCoverMask > 0.5 && gl_FrontFacing) {
       this.ensureInstanceCapacity(i + 1);
       this.drawnCells.push(cell);
       this.themeUpdates?.scalar(i, this.theme.sample(cell, time));
-      if (coversVisible) this.coverUpdates?.scalar(i, this.coverProvider!(fileAtCell(cell)));
+      if (coversVisible) this.coverUpdates?.scalar(i, this.coverProvider!(fileAtCell(cell, this.coordinateOrigin)));
       const slope = field(row + .5, lane) - field(row - .5, lane);
       this.dummy.position.set(x, y, z);
       this.dummy.rotation.set(slope * .024 * (1 - detail), 0, 0);

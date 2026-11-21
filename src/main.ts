@@ -20,7 +20,7 @@ import { ModelViewer } from "./model-viewer";
 import { ContentTransition, SurfaceTransition } from "./ui-transitions";
 import { BootSequence } from "./boot";
 import { loadBootWebfonts } from "./boot-lettering";
-import { wrap, type ArchiveNavigation } from "./archive-loop";
+import { wrap, type ArchiveNavigation, type ArchivePosition } from "./archive-loop";
 import {
   activeView,
   setActiveView,
@@ -956,7 +956,7 @@ if (entry) {
 let audioPreview = false, audioPreviewRequest = 0;
 let scene: ArchiveScene | undefined;
 let threeState: "on" | "closing" | "off" | "loading" = "on";
-let resumeCell: { lane: number; row: number } | undefined;
+let resumePosition: ArchivePosition | undefined;
 let resumeSelection = -1;
 let viewer: ModelViewer | undefined;
 const accessLog: { id: string; time: string }[] = [];
@@ -2047,11 +2047,12 @@ function frame(ms: number) {
   }
   requestAnimationFrame(frame);
 }
-function bindScene(scene: ArchiveScene, cell?: { lane: number; row: number }) {
+function bindScene(scene: ArchiveScene, position?: ArchivePosition) {
     scene.setDecryptionHeld(musicReveal.holding);
     scene.setRowSpacing(rowSpacingForView(), true);
     scene.setCoverProvider(coverTileFor, coverAtlas.texture, prepareCoverFrame);
-    scene.select(selected, cell ? { cell } : undefined);
+    if (position) scene.restoreSelection(selected, position);
+    else scene.select(selected);
     scene.setRhythmStyle(prefs.musicRhythm);
     scene.onSelect = (i, cell) => {
       if (mode !== "archive" || modal || viewer?.isOpen) return;
@@ -2096,7 +2097,7 @@ function syncThreeButton() {
 }
 function releaseThree() {
   if (!scene) return;
-  resumeCell = { ...scene.getStats().selectedCell }; resumeSelection = selected;
+  resumePosition = scene.selectionPosition(); resumeSelection = selected;
   viewer?.dispose(); viewer = undefined;
   scene.dispose(); scene = undefined;
   if (mode === "detail") {
@@ -2131,7 +2132,7 @@ async function toggleThree() {
     next.setPresentationVisible(false, true);
     await next.load();
     next.setMode(mode === "detail" ? "detail" : "archive");
-    bindScene(next, resumeSelection === selected ? resumeCell : undefined);
+    bindScene(next, resumeSelection === selected ? resumePosition : undefined);
     next.revealImmediately();
     scene = next;
     scene.setTheme(prefs.colorTheme === "dark", true);

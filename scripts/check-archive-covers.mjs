@@ -71,6 +71,29 @@ for (let lane = 0; lane < view.columns.length; lane++) {
     }
   }
 }
+// The same logical region can be represented by different local origins
+// after scrolling a long way. Album lengths and column count need not divide
+// the accumulated offset. Verify identity and navigation in both frames.
+for (const direction of [-1, 1]) {
+  const origin = { lane: direction * 4099, row: -direction * 6151 };
+  for (const lane of [-1, 0, 1, 2, 3]) {
+    for (const row of [11, 12, 13, 76, 311]) {
+      const local = { lane, row };
+      const logical = { lane: lane + origin.lane, row: row + origin.row };
+      const index = fileAtCell(logical);
+      assert.equal(fileAtCell(local, origin), index, "same physical card keeps its real track");
+      for (const axis of ["lane", "row"]) {
+        const neighbor = { ...logical, [axis]: logical[axis] + direction };
+        const target = fileAtCell(neighbor);
+        const selected = selectionCell(target, local, { axis, direction }, origin);
+        assert.deepEqual(selected, { ...local, [axis]: local[axis] + direction });
+        assert.equal(fileAtCell(selected, origin), target);
+      }
+      const fromSearch = selectionCell(index, local, undefined, origin);
+      assert.deepEqual(fromSearch, local, "a search result resolves to the nearest occurrence");
+    }
+  }
+}
 setActiveView(rhineView);
 for (let index = 0; index < rhineView.records.length; index++) {
   const { lane, row, slot } = rhineView.fileLocation(index);

@@ -9,9 +9,11 @@ import { DecryptionController } from "../src/decryption.ts";
 import { ThemeWave } from "../src/theme-motion.ts";
 import { MusicRevealGate } from "../src/music-reveal.ts";
 import { DocumentDecryption } from "../src/document-decryption.ts";
+import { activeView, buildView, rhineView, setActiveView } from "../src/archive-view.ts";
+import { cellKey, fileAtCell, sameCell, selectionCell } from "../src/archive-loop.ts";
 
-// Execute the production update's motion phase rather than a second animation
-// implementation. Only rendering, labels and pointer/visibility work are inert.
+// Execute the production motion phase and navigation callbacks with a headless
+// fixture. Rendering, labels and pointer hit testing are inert.
 // An explicit source override permits isolated mutation checks without editing
 // production code; the normal check always loads the real scene implementation.
 const sceneText = readFileSync(process.env.RHINE_ARCHIVE_TIMING_SOURCE || new URL("../src/scene.ts", import.meta.url), "utf8");
@@ -29,26 +31,20 @@ const cameraStart = update.body.statements.find(statement => ts.isVariableStatem
 assert.ok(cameraStart, "Motion harness must stop before camera/rendering work");
 const updateText = sceneText.slice(update.getStart(sceneAst), update.body.getStart(sceneAst) + 1) +
   sceneText.slice(update.body.getStart(sceneAst) + 1, cameraStart.getStart(sceneAst)) + "\n}";
-const methodNames = ["setMode", "select", "resetFrameClock", "rowSpacing", "cellPosition", "modelClarity", "reduced"];
+const methodNames = ["setMode", "select", "resetFrameClock", "rowSpacing", "cellPosition", "modelClarity", "reduced",
+  "rebaseCoordinates", "setHover", "navigatePlane", "selectionPosition", "restoreSelection"];
 // Keep the boundary regression runnable before its production fix exists.
 if (archiveClass.members.some(member => member.name?.getText(sceneAst) === "markMotionChange")) methodNames.push("markMotionChange");
 const classText = `class MotionFixture { ${updateText}\n${methodNames.map(name => method(name).getText(sceneAst)).join("\n")} }`;
-const loopText = readFileSync(new URL("../src/archive-loop.ts", import.meta.url), "utf8");
-const loopAst = ts.createSourceFile("archive-loop.ts", loopText, ts.ScriptTarget.Latest, true);
-const loopFunctions = ["sameCell", "cellKey", "selectionCell"].map(name => {
-  const node = loopAst.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === name);
-  assert.ok(node, `Archive loop ${name} must exist`);
-  return node.getText(loopAst).replace(/^export\s+/, "");
-}).join("\n");
 const fixtureDocument = { createElement: () => ({ width: 0, height: 0, getContext: () => ({ drawImage() {} }) }) };
 let inputClock = 100;
 const deps = { THREE, ...motion, RhythmMotion, rhythmDisplacement, quietBands,
   COLUMN_SPACING: 5.2, ROW_SPACING: .62, document: fixtureDocument,
   performance: { now: () => inputClock * 1000 },
   themeEnvironment() {}, ease: value => motion.smooth(value),
-  fileLocation: index => ({ lane: 2, row: 12 + index, slot: index }),
+  cellKey, sameCell, selectionCell, fileAtCell, fileLocation: index => activeView().fileLocation(index),
   fullMotion, reducedMotion: () => Object.fromEntries(Object.keys(fullMotion()).map(key => [key, false])) };
-const js = ts.transpileModule(`${loopFunctions}\n${classText}`, {
+const js = ts.transpileModule(classText, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
 const MotionFixture = Function(...Object.keys(deps), `${js}\nreturn MotionFixture;`)(...Object.values(deps));
@@ -75,7 +71,7 @@ function fixture() {
     decryption: new DecryptionController(), deferSelectionPulse: false,
     labelCanvas: {}, disposed: [],
     appearance: { prepare() {}, apply() {}, setClarity() {}, setTheme() {}, dispose(group) { f.disposed.push(group); } },
-    cancelPointer() {}, setHover() {}, canBrowse: () => true, rebaseCoordinates() {},
+    cancelPointer() {}, canBrowse: () => true,
     presentationDrop: () => 0, drawLabel() {}, emitPulse() {},
   });
   f.model.add(new THREE.Mesh());
@@ -278,5 +274,36 @@ check("new input does not reset the already returning copy's elapsed time", () =
   assert.ok(f.disposed.includes(old.group));
   assert.ok(f.outgoing.includes(fresh), "The fresh copy must consume only its 10ms interval and remain visible");
 });
+const albumSizes = [7, 10, 13];
+const albums = albumSizes.map((_, i) => "Album " + i);
+const records = albumSizes.flatMap((size, lane) => Array.from({ length: size }, (_, row) =>
+  ({ id: "track-" + lane + "-" + row, category: albums[lane] })));
+const music = buildView("music", albums, undefined, records, record => albums.indexOf(record.category));
+setActiveView(music);
+for (const direction of [-1, 1]) {
+  check(`rebase preserves the hovered, dragged and restored track in direction ${direction}`, () => {
+    const f = fixture();
+    const before = { lane: direction * 2049, row: -direction * 2053 };
+    const track = fileAtCell({ lane: before.lane + 1, row: before.row - 1 });
+    f.select(fileAtCell(before), { cell: before });
+    f.rebaseCoordinates();
+    const neighbor = { lane: f.selectedCell.lane + 1, row: f.selectedCell.row - 1 };
+    assert.notEqual(fileAtCell(neighbor), track, "Ignoring the new origin must point to a different track");
+    let hovered;
+    f.onHover = index => { hovered = index; };
+    f.setHover(neighbor);
+    assert.equal(hovered, track, "Hover label identifies the logical neighbor");
+    f.onSelect = (index, cell) => f.select(index, { cell });
+    f.navigatePlane(neighbor);
+    assert.equal(f.selectedSlot, music.fileLocation(track).slot, "Dragging selects the same neighbor");
+    f.select(track);
+    assert.deepEqual(f.selectedCell, neighbor, "Selecting the track again preserves its physical occurrence");
+    const saved = f.selectionPosition(), reopened = fixture();
+    assert.deepEqual(saved, { cell: neighbor, origin: f.coordinateOrigin });
+    reopened.restoreSelection(track, saved);
+    assert.deepEqual(reopened.selectionPosition(), saved, "Reopening restores both the cell and its origin");
+  });
+}
+setActiveView(rhineView);
 console.log(`${passed}/${passed + failed} archive timing checks passed.`);
 if (failed) process.exitCode = 1;

@@ -84,6 +84,7 @@ const edge = spawn(
   EDGE,
   [
     "--headless=new",
+    "--mute-audio",
     "--no-sandbox",
     "--disable-gpu",
     "--enable-unsafe-swiftshader",
@@ -835,6 +836,26 @@ try {
   check("简化动画不等待揭示帧且只发出一次起播调用", reducedStartFrames.length===1 &&
     reducedStartFrames[0].phase==="starting" && reducedStartFrames[0].frame===null && reducedStartFrames[0].masks===0,
     JSON.stringify(reducedStartFrames));
+  const switchedDetails = await cdp.evaluate(`(() => {
+    const toggle = document.querySelector('[data-action="library-mode"]');
+    const snapshot = () => {
+      const {mode, libraryMode} = window.rhine.stats();
+      const {playing, id} = window.rhine.music.player.state();
+      return {mode, libraryMode, playing, id, detailInert:document.querySelector('#detail-ui').inert};
+    };
+    toggle.click();
+    const archive = snapshot();
+    document.querySelector('.read-file[data-action="open"]').click();
+    const archiveDetail = window.rhine.stats().mode === 'detail' &&
+      !!document.querySelector('#detail-content [data-action="bookmark"]');
+    toggle.click();
+    return {archive, archiveDetail, music:snapshot()};
+  })()`, false, 20000);
+  check("双向切库收起旧详情，档案操作匹配且当前歌曲继续播放",
+    switchedDetails.archive.libraryMode === "archive" && switchedDetails.archiveDetail &&
+    switchedDetails.music.libraryMode === "music" && [switchedDetails.archive, switchedDetails.music].every(
+      state => state.mode === "archive" && state.detailInert && state.playing && state.id === archiveTarget.id
+    ), JSON.stringify(switchedDetails));
   // Playback is already verified. Stop the reactive music before restoring
   // full motion and capturing the archive on a software-rendered CI host.
   await cdp.evaluate(`window.rhine.music.player.stop()`,false,20000);

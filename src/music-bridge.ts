@@ -63,6 +63,7 @@ export type BridgeStatus = {
   length: number;
   volume: number;
   currentId: string | null;
+  playbackId?: string | null;
   title: string;
   artist: string;
   album: string;
@@ -120,6 +121,7 @@ export class MusicBridge {
   private transportSequence = 0;
   private transportAbort = new AbortController();
   private preparedTrack: { id: string; ticket: string } | null = null;
+  private playbackId: string | null = null;
   private queue: { id: string }[] = [];
   private playMode: PlayMode = "list";
   private intentId: string | null = null;
@@ -343,6 +345,7 @@ export class MusicBridge {
   }
 
   private resetConnection() {
+    this.playbackId = null;
     ++this.transportSequence;
     this.transportAbort.abort();
     this.transportAbort = new AbortController();
@@ -593,6 +596,7 @@ export class MusicBridge {
       return null;
     }
     this.deliveredStatus = sequence;
+    this.playbackId = status.playbackId ?? null;
     if (status.currentId !== null || status.state === "playing" || status.state === "paused") this.outputMayRemain = true;
     this.options.onState?.(status);
     if (status.state === "playing" && !status.loading && !status.prepared && !this.preparedTrack && !this.transportBusy) {
@@ -660,6 +664,7 @@ export class MusicBridge {
   }
 
   private beginTransport() {
+    this.playbackId = null;
     ++this.transportSequence;
     this.transportAbort.abort();
     this.transportAbort = new AbortController();
@@ -685,13 +690,14 @@ export class MusicBridge {
     this.intentId = id;
     this.outputMayRemain = true;
     try {
-      const ready = await this.request<{ ready: boolean; ticket: string }>(
+      const ready = await this.request<{ ready: boolean; ticket: string; playbackId?: string }>(
         this.transportPath(`/api/prepare?id=${encodeURIComponent(id)}&position=${options.position ?? 0}`, sequence),
         30000, generation, false, this.transportAbort.signal,
       );
       if (!this.current(generation) || sequence !== this.transportSequence) return false;
       if (!ready.ready || !ready.ticket) throw new Error("VLC 未完成音频准备");
       this.preparedTrack = { id, ticket: ready.ticket };
+      this.playbackId = ready.playbackId ?? null;
       this.lastError = "";
       // The authenticated prepare response is the readiness acknowledgement.
       // A separate short status poll must not discard this valid start ticket.
@@ -759,10 +765,16 @@ export class MusicBridge {
   }
 
   async seek(seconds: number): Promise<BridgeStatus | null> {
-    return this.command(
-      `/api/seek?seconds=${encodeURIComponent(seconds.toFixed(2))}`,
-      COMMAND_TIMEOUT, false,
-    );
+    if (this.transportBusy || !this.playbackId) return null;
+    try {
+      return await this.command(
+        `/api/seek?seconds=${encodeURIComponent(seconds.toFixed(2))}&playbackId=${encodeURIComponent(this.playbackId)}`,
+        COMMAND_TIMEOUT, false,
+      );
+    } catch (error) {
+      if (error instanceof BridgeRequestError && error.status === 409 && error.payload.error === "superseded seek") return null;
+      throw error;
+    }
   }
 
   /** Volume is stored as 0..1 in the app and as 0..512 in VLC. */

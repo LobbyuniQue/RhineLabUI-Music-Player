@@ -106,6 +106,18 @@ try {
     assert.equal(restored.tracks[0].title, "Track 1000"); assert.equal(restored.playlist.part, 1); assert.equal(reads, before);
     await writeFile(selectionFile, "{broken"); assert.deepEqual(await loadPlaylistSelection(selectionFile, bulk), { part: 0, split: false });
   });
+  await check("a legacy native cache refreshes only FLAC metadata once", async () => {
+    await writeFile(join(last, "sample.flac"), Buffer.concat([Buffer.from("fLaC"), Buffer.from([128, 0, 0, 34]), Buffer.alloc(34)]));
+    await library.scan({root: last, part: 0, split: false});
+    const legacy = JSON.parse(await readFile(cacheFile, "utf8"));
+    legacy.tracks = legacy.tracks.map(({metadataRevision, ...track}) => ({...track, title: "Old cache"}));
+    await writeFile(cacheFile, JSON.stringify(legacy));
+    const updated = await library.scan();
+    assert.deepEqual([updated.added, updated.reused], [1, 1]);
+    assert.equal(library.tracks.find(track => track.codec === "flac").title, "sample");
+    assert.equal(library.tracks.find(track => track.codec === "mp3").title, "Old cache");
+    assert.equal((await library.scan()).reused, 2, "the migrated revision is persisted");
+  });
   await check("playlist payload enforces JSON, a bounded body and valid root/volume/split types", async () => {
     const request = (body, type = "application/json") => Object.assign(Readable.from([Buffer.from(body)]), { headers: { "content-type": type } });
     assert.deepEqual(await readPlaylistRequest(request(JSON.stringify({ root: small, part: 0, split: false }))), { root: small, part: 0, split: false });

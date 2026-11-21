@@ -1,16 +1,20 @@
 // Isolation test: does page-like polling/SSE prevent VLC from starting playback?
-// Usage: node scripts/diagnostics/bridge-isolate.mjs <port> <token> <mode>
+// Use a dedicated bridge started with --aout dummy.
 //   mode "quiet"  → play immediately, no polling, no SSE
 //   mode "page"   → open the spectrum SSE and poll /api/status twice a second first
-const PORT = Number(process.argv[2] ?? 8795);
-const TOKEN = process.argv[3] ?? "iso";
-const MODE = process.argv[4] ?? "quiet";
+const [, , flag, port, TOKEN, MODE = "quiet"] = process.argv;
+const PORT = Number(port);
+if (flag !== "--dummy-bridge" || !Number.isInteger(PORT) || PORT < 1 || PORT > 65535 || !TOKEN?.trim() || !["quiet", "page"].includes(MODE)) {
+  console.error("Usage: bridge-isolate.mjs --dummy-bridge <port> <token> [quiet|page] (use a dedicated bridge started with --aout dummy)");
+  process.exit(2);
+}
 const BASE = `http://127.0.0.1:${PORT}`;
 const auth = { authorization: `Bearer ${TOKEN}` };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const status = async () =>
   (await fetch(`${BASE}/api/status`, { headers: auth })).json();
+if ((await status()).dummyAudioOutput !== true) throw new Error("This probe requires a bridge with --aout dummy.");
 const library = await (
   await fetch(`${BASE}/api/library`, { headers: auth })
 ).json();

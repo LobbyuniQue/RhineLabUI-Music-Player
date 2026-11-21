@@ -1,6 +1,7 @@
 import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { metadataRevision } from "../../src/music-metadata.ts";
 
 export const PLAYLIST_LIMIT = 1000;
 
@@ -148,7 +149,8 @@ export class NativePlaylistLibrary {
           const info = await stat(path);
           const previous = cached.get(path);
           const artExists = !previous?.cover || await stat(join(this.coverDir, previous.id)).then((value) => value.isFile()).catch(() => false);
-          if (previous && previous.size === info.size && previous.mtime === info.mtimeMs && artExists) {
+          if (previous && previous.size === info.size && previous.mtime === info.mtimeMs && artExists &&
+              (previous.metadataRevision ?? 0) === metadataRevision(previous.codec)) {
             if (previous.cover) await copyFile(join(this.coverDir, previous.id), join(staging, previous.id));
             tracks.push(previous);
             report.reused++;
@@ -163,7 +165,7 @@ export class NativePlaylistLibrary {
           tracks.push({ id, path, name: basename(path), size: info.size, mtime: info.mtimeMs,
             title: meta.title, artist: meta.artist, album: meta.album, track: meta.track,
             disc: meta.disc ?? null, year: meta.year ?? "", genre: meta.genre ?? "",
-            duration: meta.duration, codec: meta.codec, cover });
+            duration: meta.duration, codec: meta.codec, metadataRevision: metadataRevision(meta.codec), cover });
           report.added++;
         } catch { report.failed++; }
       }

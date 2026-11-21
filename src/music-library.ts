@@ -17,7 +17,7 @@ import {
   type MusicSource,
   type MusicFileEntry,
 } from "./music-source";
-import { isAudioFile, readTrackMeta, type TrackMeta } from "./music-metadata";
+import { isAudioFile, metadataRevision, readTrackMeta, type TrackMeta } from "./music-metadata";
 import type { BridgeTrack } from "./music-bridge";
 
 export type LibraryTrack = SearchableTrack & {
@@ -124,6 +124,7 @@ const toStored = (entry: { id: string; path: string; name: string; size: number;
   genre: meta.genre,
   duration: meta.duration,
   codec: meta.codec,
+  metadataRevision: metadataRevision(meta.codec),
   tagged: meta.tagged,
   hasCover,
   missing: false,
@@ -462,12 +463,13 @@ export class MusicLibrary {
     if (!this.source || !this.tracks.includes(track)) return null;
     const source = this.source, generation = this.operationGeneration;
     const file = await source.resolve(track.path);
-    if (source !== this.source || generation !== this.operationGeneration) return null;
-    if (!file) {
-      track.missing = true;
+    if (source !== this.source || generation !== this.operationGeneration || !this.tracks.includes(track)) return null;
+    const missing = !file;
+    if (track.missing !== missing) {
+      track.missing = missing;
       const stored = this.stored.get(track.id);
       if (stored) {
-        stored.missing = true;
+        stored.missing = missing;
         void this.store.putTracks([stored], this.operation.signal).catch(() => {});
       }
     }
@@ -613,7 +615,8 @@ export class MusicLibrary {
         check();
         report.bytes += file.size;
         const unchanged =
-          reuseSource && saved && saved.size === file.size && saved.modified === file.lastModified && !saved.missing;
+          reuseSource && saved && saved.size === file.size && saved.modified === file.lastModified && !saved.missing &&
+          (saved.metadataRevision ?? 0) === metadataRevision(saved.codec);
         if (unchanged) {
           report.reused++;
           next.set(saved.id, saved);

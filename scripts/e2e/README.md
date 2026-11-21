@@ -19,6 +19,8 @@ npm run test:e2e:music
 | `npm run test:e2e:vlc` | 桥接连接、VLC 曲库、播放入口及音乐设置 | 网页 4190 / 调试 9336 / 桥接 8801 |
 | `npm run preview:dist` | 静态预览现有构建产物 | 网页 4173 |
 
+两套集成测试都用 `--mute-audio` 启动独立浏览器。VLC 测试使用 `--aout dummy` 输出，仍然从解码后的 PCM 检查频谱。独立的 `scripts/check-vlc-bridge.mjs` 协议检查也默认静音。
+
 VLC 通路还需已有的 VLC 安装；需要获取时使用项目既有 `node scripts/fetch-vlc.mjs`。两套浏览器检查按顺序运行，截图保存在 `.local/screenshots/music/`。
 
 音乐面板布局检查保留 1920×1080、960×600、390×844 三种真实 CSS 视口，分别验证搜索栏、表头、曲目滚动、播放器与页脚边界。此段单独使用 DPR 0.25，降低无头软件渲染的像素开销；布局截图为低像素密度证据，不用于评判三维画质。退出此段即清除覆盖，后续播放与动画检查恢复原来的设备配置。

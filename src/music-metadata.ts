@@ -1,8 +1,8 @@
 // Local music metadata reader.
 //
 // Tags are read with random access, so a 60 MB lossless file is never held in
-// memory: only the ID3v2 tag, the container header and the trailing 128 bytes
-// for ID3v1 are touched. Containers: mp3 (ID3v2.2/2.3/2.4 + ID3v1), flac,
+// memory: only container headers, supported metadata and short tail ranges
+// are read. Containers: mp3 (ID3v2.2/2.3/2.4 + ID3v1), flac,
 // mp4/m4a, ogg (vorbis/opus), wav. Anything unreadable falls back to the file
 // name instead of throwing, so one broken file never stops a library scan.
 
@@ -42,6 +42,9 @@ const MAX_TAG_BYTES = 16 * 1024 * 1024;
 const MAX_PICTURE_BYTES = 8 * 1024 * 1024;
 const HEAD_BYTES = 256 * 1024;
 const TAIL_BYTES = 64 * 1024;
+
+// A missing revision in an older index is revision zero.
+export const metadataRevision = (codec: string) => codec === "flac" ? 1 : 0;
 
 export const emptyMeta = (): TrackMeta => ({
   title: "",
@@ -166,13 +169,15 @@ class ByteReader {
     const start = Math.max(0, Math.min(offset, this.size));
     const end = Math.max(start, Math.min(offset + length, this.size));
     if (end <= start) return new Uint8Array(0);
+    if (this.head && end <= this.head.length) return this.head.subarray(start, end);
     return new Uint8Array(await this.blob.slice(start, end).arrayBuffer());
   }
 }
 
 const ascii = (bytes: Uint8Array, offset: number, length: number) => {
   let text = "";
-  for (let i = 0; i < length; i++) text += String.fromCharCode(bytes[offset + i] ?? 0);
+  const end = Math.min(bytes.length, offset + length);
+  for (let i = offset; i < end; i++) text += String.fromCharCode(bytes[i]);
   return text;
 };
 
@@ -399,40 +404,54 @@ function parseMp3(bytes: Uint8Array, fileSize: number, audioOffset: number, meta
 
 // --------------------------------------------------------------------- flac
 
-function parseFlac(bytes: Uint8Array, meta: TrackMeta) {
+async function readFlacPicture(reader: ByteReader, start: number, end: number): Promise<TrackPicture | null> {
+  // PICTURE has 32 fixed bytes plus the MIME type, description and image.
+  if (end - start < 32) return null;
+  const mimeLength = u32be(await reader.bytes(start + 4, 4), 0);
+  const mimeStart = start + 8;
+  const descriptionField = mimeStart + mimeLength;
+  if (descriptionField + 24 > end || mimeLength > 255) return null;
+  const descriptionLength = u32be(await reader.bytes(descriptionField, 4), 0);
+  // After the description come four 32-bit image properties and the data length.
+  const imageStart = descriptionField + 24 + descriptionLength;
+  if (imageStart > end) return null;
+  const imageLength = u32be(await reader.bytes(imageStart - 4, 4), 0);
+  if (imageLength <= 64 || imageLength > MAX_PICTURE_BYTES || imageLength > end - imageStart) return null;
+  const mime = ascii(await reader.bytes(mimeStart, mimeLength), 0, mimeLength) || "image/jpeg";
+  const data = await reader.bytes(imageStart, imageLength);
+  // A small subarray from the prefix should not retain the whole prefix as cover art.
+  return { mime, data: data.byteLength === data.buffer.byteLength ? data : data.slice() };
+}
+
+async function parseFlac(reader: ByteReader, meta: TrackMeta) {
   meta.codec = "flac";
   let offset = 4;
-  while (offset + 4 <= bytes.length) {
-    const header = bytes[offset];
-    const last = (header & 0x80) !== 0;
-    const type = header & 0x7f;
-    const length = (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3];
+  let budget = MAX_TAG_BYTES;
+  // Bound header reads independently: even a zero-length padding block is legal.
+  for (let i = 0; i < 1024 && offset + 4 <= reader.size; i++) {
+    const header = await reader.bytes(offset, 4);
+    const type = header[0] & 0x7f;
+    const length = (header[1] << 16) | (header[2] << 8) | header[3];
     const start = offset + 4;
-    const block = bytes.subarray(start, Math.min(start + length, bytes.length));
+    const end = start + length;
+    if (end > reader.size) break;
 
-    if (type === 0 && block.length >= 18) {
+    if (type === 0 && length === 34) {
+      const block = await reader.bytes(start, 18);
       const sampleRate = (block[10] << 12) | (block[11] << 4) | (block[12] >> 4);
       const totalSamples =
         (block[13] & 0x0f) * 4294967296 +
         u32be(block, 14);
       if (sampleRate > 0 && totalSamples > 0) meta.duration = totalSamples / sampleRate;
-    } else if (type === 4) {
-      parseVorbisComment(block, meta);
-    } else if (type === 6 && !meta.picture) {
-      let cursor = 4;
-      const mimeLength = u32be(block, cursor);
-      cursor += 4;
-      const mime = ascii(block, cursor, mimeLength) || "image/jpeg";
-      cursor += mimeLength;
-      const descriptionLength = u32be(block, cursor);
-      cursor += 4 + descriptionLength + 16;
-      const dataLength = u32be(block, cursor);
-      cursor += 4;
-      if (dataLength > 64 && dataLength <= MAX_PICTURE_BYTES && cursor + dataLength <= block.length)
-        meta.picture = { mime, data: new Uint8Array(block.subarray(cursor, cursor + dataLength)) };
+    } else if (type === 4 && length <= budget) {
+      parseVorbisComment(await reader.bytes(start, length), meta);
+      budget -= length;
+    } else if (type === 6 && !meta.picture && length <= budget) {
+      meta.picture = await readFlacPicture(reader, start, end);
+      if (meta.picture) budget -= meta.picture.data.length;
     }
-    if (last || length <= 0) break;
-    offset = start + length;
+    if (header[0] & 0x80) break;
+    offset = end;
   }
 }
 
@@ -681,7 +700,7 @@ export async function readTrackMeta(blob: Blob, name: string): Promise<TrackMeta
       }
     }
 
-    if (head.length >= 4 && ascii(head, 0, 4) === "fLaC") parseFlac(head, meta);
+    if (head.length >= 4 && ascii(head, 0, 4) === "fLaC") await parseFlac(reader, meta);
     else if (head.length >= 12 && ascii(head, 4, 4) === "ftyp") await parseMp4(reader, head, meta);
     else if (head.length >= 4 && ascii(head, 0, 4) === "OggS") await parseOgg(reader, head, meta);
     else if (head.length >= 12 && ascii(head, 0, 4) === "RIFF" && ascii(head, 8, 4) === "WAVE")

@@ -30,6 +30,7 @@ const edge = spawn(
   EDGE,
   [
     "--headless=new",
+    "--mute-audio",
     "--no-sandbox",
     "--disable-gpu",
     "--enable-unsafe-swiftshader",

@@ -19,6 +19,6 @@ node scripts/diagnostics/probe-cover.mjs
 node scripts/diagnostics/probe-pause.mjs
 ```
 
-桥接探针需先启动本地桥接，然后传入本次端口与令牌；例如 `node scripts/diagnostics/bridge-test.mjs 8788 <本次令牌>`。`bridge-isolate.mjs` 还接受 `quiet` 或 `page` 模式，`vlc-tap.mjs` 接受 PCM 端口。
+主动播放的探针需要以 `--aout dummy` 启动的独立测试桥接。运行 `node scripts/diagnostics/bridge-test.mjs --dummy-bridge <测试端口> <测试令牌>` 时，脚本会先核对输出配置。`bridge-isolate.mjs` 使用相同参数，最后可加 `quiet` 或 `page`。`vlc-tap.mjs` 仅读取指定端口的 PCM 数据。
 
 常规基础回归使用 `npm run check`，完整音乐通路使用 `npm run test:e2e:music` 或 `npm run test:e2e:vlc`。

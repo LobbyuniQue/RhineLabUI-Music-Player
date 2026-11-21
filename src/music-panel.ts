@@ -247,6 +247,12 @@ export class MusicPanel {
     this.root?.querySelector<HTMLInputElement>("#music-search")?.focus({ preventScroll: true });
   }
 
+  refreshAvailability() {
+    if (!this.mounted || this.usingBridge) return;
+    this.renderResults();
+    this.renderStatus();
+  }
+
   /** Re-renders after the library was replaced from outside (bridge or rescan). */
   refreshLibrary() {
     this.resetCover();

@@ -829,14 +829,18 @@ test("play and transport commands consume their own receipts without a second st
     const url = new URL(raw); calls.push(url.pathname);
     if (url.pathname === "/api/status") throw new Error("status temporarily unavailable");
     if (url.pathname === "/api/prepare") {
-      native = { ...status("paused", "a"), prepared: true };
+      native = { ...status("paused", "a"), prepared: true, playbackId: "first-playback" };
       return response({ ready: true, ticket: "ticket-a" });
     }
     if (url.pathname === "/api/start" || url.pathname === "/api/resume") native = { ...native, state: "playing", prepared: false };
     if (url.pathname === "/api/pause") native = { ...native, state: "paused" };
     if (url.pathname === "/api/stop") native = status();
     // Seek/volume endpoints return a direct status, unlike transport endpoints.
-    if (url.pathname === "/api/seek") { native = { ...native, time: 3 }; return response({ ...native }); }
+    if (url.pathname === "/api/seek") {
+      assert.equal(url.searchParams.get("playbackId"), native.playbackId);
+      native = { ...native, time: Number(url.searchParams.get("seconds")) };
+      return response({ ...native });
+    }
     if (url.pathname === "/api/volume") { native = { ...native, volume: 128 }; return response({ ...native }); }
     return response({ status: { ...native } });
   });
@@ -844,7 +848,8 @@ test("play and transport commands consume their own receipts without a second st
   assert.equal((await h.bridge.seek(3)).time, 3);
   assert.equal((await h.bridge.volume(.25)).volume, 128);
   assert.equal((await h.bridge.pause()).state, "paused");
-  assert.equal((await h.bridge.resume()).time, 3);
+  assert.equal((await h.bridge.seek(5)).state, "paused");
+  assert.equal((await h.bridge.resume()).time, 5);
   assert.equal((await h.bridge.stop()).state, "stopped");
   assert.equal(h.states.at(-1).state, "stopped");
   assert.equal(h.bridge.connected, true);

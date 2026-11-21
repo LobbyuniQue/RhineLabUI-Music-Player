@@ -123,6 +123,31 @@ function indexedDbFixture() {
   };
 }
 try {
+  await check("reauthorizing a folder clears the missing marker without a rescan", async () => {
+    const value = library(), file = fixture("restored.mp3"), root = directory("Library", file);
+    let granted = true;
+    root.queryPermission = async () => granted ? "granted" : "prompt";
+    root.requestPermission = async () => { granted = true; return "granted"; };
+    root.getFileHandle = async () => {
+      if (!granted) throw new DOMException("permission lost", "NotAllowedError");
+      return { getFile: async () => file };
+    };
+    window.showDirectoryPicker = async () => root;
+    await value.pick();
+    await value.scan(() => {});
+    delete window.showDirectoryPicker;
+    const track = value.tracks[0];
+    granted = false;
+    assert.equal(await value.file(track), null);
+    assert.equal(value.stats().missing, 1);
+    assert.equal((await value.store.allTracks())[0].missing, true);
+    assert.equal(await value.reconnect(), true);
+    assert.equal(await value.file(track), file);
+    assert.equal(track.missing, false);
+    assert.equal(value.stats().missing, 0);
+    await value.restore();
+    assert.equal(value.tracks[0].missing, false);
+  });
   await check("selected source and root publish only with a successful scan", async () => {
     const value = library(), a = fixture("same.mp3", "red"), b = fixture("same.mp3", "tan");
     const rootA = directory("A", a), rootB = directory("B", b, true);
@@ -445,6 +470,25 @@ try {
     const changed = await value.scan(() => {});
     assert.equal(changed.parsed, 1); assert.equal(changed.reused, 0);
     assert.match(await (await value.store.cover("same.mp3")).text(), /tan/);
+  });
+  await check("restoring a legacy index refreshes only FLAC metadata once", async () => {
+    const value = library();
+    const files = [new File(["fLaC", Uint8Array.of(128, 0, 0, 34), new Uint8Array(34)], "sample.flac"), fixture("other.mp3")];
+    window.showDirectoryPicker = async () => ({kind: "directory", name: "Saved music", async *values() {
+      for (const file of files) yield {kind: "file", name: file.name, getFile: async () => file};
+    }});
+    await value.pick();
+    delete window.showDirectoryPicker;
+    assert.equal((await value.scan(() => {})).parsed, 2);
+    const legacy = (await value.store.allTracks()).map(({metadataRevision, ...track}) => ({...track, title: "Old cache"}));
+    await value.store.putTracks(legacy);
+    await value.restore();
+    const updated = await value.scan(() => {});
+    assert.deepEqual([updated.parsed, updated.reused], [1, 1]);
+    assert.equal(value.tracks.find(track => track.codec === "flac").title, "sample");
+    assert.equal(value.tracks.find(track => track.codec === "mp3").title, "Old cache");
+    await value.restore();
+    assert.equal((await value.scan(() => {})).reused, 2, "the migrated revision is persisted");
   });
   await check("same path with removed embedded art deletes the old stored cover", async () => {
     const value = library(); value.useFiles([fixture("same.mp3", "red", 1000)]);

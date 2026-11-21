@@ -314,12 +314,13 @@ const musicPlayer = new MusicPlayer({
   resolve: async (id) => {
     const track = musicLibrary.tracks.find((item) => item.id === id);
     if (!track) return null;
-    const file = await musicLibrary.file(track);
-    if (file) return file;
+    const wasMissing = track.missing;
+    let file = await musicLibrary.file(track);
     // A remembered directory handle may need a fresh gesture to be readable.
-    if (musicLibrary.persistent && (await musicLibrary.reconnect().catch(() => false)))
-      return musicLibrary.file(track);
-    return null;
+    if (!file && musicLibrary.persistent && (await musicLibrary.reconnect().catch(() => false)))
+      file = await musicLibrary.file(track);
+    if (track.missing !== wasMissing) musicPanel.refreshAvailability();
+    return file;
   },
   coverUrl: async (id) => {
     const track = musicLibrary.tracks.find((item) => item.id === id);
@@ -553,11 +554,13 @@ function applyRowSpacing(immediate = false) {
   scene?.setRowSpacing(rowSpacingForView(), immediate);
 }
 function applyView(v: ArchiveView, preferBackingId?: string) {
-  if (musicReveal.pending || musicReveal.holding) {
-    void cancelMusicArchive();
-    if (mode === "detail") setMode("archive");
-  }
   const previous = view();
+  const unfinishedReveal = musicReveal.pending || musicReveal.holding;
+  if (mode === "detail" && (previous.kind !== v.kind || unfinishedReveal)) {
+    setMode("archive");
+  } else if (unfinishedReveal) {
+    void cancelMusicArchive();
+  }
   const previousGroup = previous.kind === v.kind ? previous.columns[previous.fileLocation(selected).lane] : undefined;
   setActiveView(v);
   applyRowSpacing();

@@ -356,7 +356,8 @@ async function prepareTrack(id, revision, position = 0) {
   prepared = null;
   transportIntent = "preparing";
   hasStarted = false;
-  current = { id, startedAt: 0 };
+  // A replay of the same library track is a different target for delayed seeks.
+  current = { id, playbackId: randomUUID(), startedAt: 0 };
   // Muting is a second guard even on VLC versions whose start-paused option
   // opens output before pausing. No preparation may send audible samples.
   preparationMuted = true;
@@ -377,7 +378,7 @@ async function prepareTrack(id, revision, position = 0) {
   transportIntent = "ready";
   await refreshStatus();
   assertTransport(revision);
-  return { ready: true, prepared: true, id, ticket: prepared.ticket };
+  return { ready: true, prepared: true, id, playbackId: current.playbackId, ticket: prepared.ticket };
 }
 
 async function startPrepared(ticket, revision) {
@@ -418,6 +419,8 @@ function mapStatus(raw) {
     prepared: transportIntent === "ready",
     ended: hasStarted && transportIntent === "playing" && raw?.state === "stopped",
     currentId: current.id,
+    playbackId: current.playbackId ?? null,
+    dummyAudioOutput: args.aout === "dummy",
     title: meta.title ?? "",
     artist: meta.artist ?? "",
     album: meta.album ?? "",
@@ -731,10 +734,19 @@ async function handle(req, res) {
   if (url.pathname === "/api/seek") {
     const seconds = Number(url.searchParams.get("seconds") ?? 0);
     if (!Number.isFinite(seconds)) return json(res, 400, { error: "invalid playback position" });
+    const playbackId = url.searchParams.get("playbackId");
+    const revision = transportRevision;
+    const client = url.searchParams.get("client");
+    const sequence = Number(url.searchParams.get("sequence"));
+    if (!playbackId || playbackId !== current.playbackId ||
+        (client && (!Number.isSafeInteger(sequence) || sequence < (clientSequences.get(client) ?? 0))))
+      return json(res, 409, { error: "superseded seek" });
     const result = await controlQueue.run(async () => {
+      if (revision !== transportRevision || playbackId !== current.playbackId) return null;
       await vlcCall(`?command=seek&val=${encodeURIComponent(String(Math.max(0, seconds)))}`);
       return status();
     });
+    if (!result) return json(res, 409, { error: "superseded seek" });
     return json(res, 200, result);
   }
   if (url.pathname === "/api/volume") {

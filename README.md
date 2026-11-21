@@ -16,6 +16,8 @@ RhineLabUI 本地扩展工程，以三维档案阵列承载本地曲库，把歌
 
 ## 当前功能
 
+本地实验分支 `experiment/basic-stability` 基于 0.1.5 改进了 FLAC 索引、目录重新授权、跨库详情切换和 VLC 进度定位。已有曲库可重新扫描一次以更新旧 FLAC 记录。见[实验验证记录](verification/BASIC-STABILITY.md)。
+
 ### 本地音乐与三维曲库
 
 | 功能 | 当前行为 |

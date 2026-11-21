@@ -22,6 +22,7 @@ export type StoredTrack = {
   genre: string;
   duration: number | null;
   codec: string;
+  metadataRevision?: number;
   tagged: boolean;
   hasCover: boolean;
   /** True when the file could not be read during the last scan. */

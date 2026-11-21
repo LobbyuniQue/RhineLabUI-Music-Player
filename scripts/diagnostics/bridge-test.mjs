@@ -1,6 +1,10 @@
 // Exercise the VLC bridge: health, scan, play, status, bands, spectrum SSE.
-const PORT = Number(process.argv[2] ?? 8788);
-const TOKEN = process.argv[3] ?? "";
+const [, , flag, port, TOKEN] = process.argv;
+const PORT = Number(port);
+if (flag !== "--dummy-bridge" || !Number.isInteger(PORT) || PORT < 1 || PORT > 65535 || !TOKEN?.trim()) {
+  console.error("Usage: bridge-test.mjs --dummy-bridge <port> <token> (use a dedicated bridge started with --aout dummy)");
+  process.exit(2);
+}
 const BASE = `http://127.0.0.1:${PORT}`;
 const auth = TOKEN ? { authorization: `Bearer ${TOKEN}` } : {};
 
@@ -34,6 +38,9 @@ if (!health || health.status !== 200) {
 }
 console.log(`health (${Date.now() - started}ms):`, JSON.stringify(health.body));
 
+const output = await get("/api/status");
+if (output.status !== 200 || output.body?.dummyAudioOutput !== true)
+  throw new Error("This probe requires a bridge with --aout dummy.");
 const library = await get("/api/library");
 console.log(`library: ${library.body.tracks?.length} tracks`);
 for (const track of (library.body.tracks ?? []).slice(0, 6))
@@ -111,7 +118,7 @@ console.log(
 );
 
 const seekTo = Math.max(1, Math.round((status.body.length || 6) * 0.5));
-const seek = await get(`/api/seek?seconds=${seekTo}`);
+const seek = await get(`/api/seek?seconds=${seekTo}&playbackId=${encodeURIComponent(status.body.playbackId)}`);
 console.log(
   `seek to ${seekTo}s →`,
   JSON.stringify({ state: seek.body.state, time: seek.body.time }),

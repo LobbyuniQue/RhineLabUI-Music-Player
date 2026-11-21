@@ -4,7 +4,7 @@
 // the loopback API: token enforcement, catalogue, playback, transport, and the
 // PCM tap that feeds the archive music reaction.
 //
-// Usage: node scripts/check-vlc-bridge.mjs [--root <dir>]
+// Usage: node scripts/check-vlc-bridge.mjs [--root <dir>] [--real-audio]
 // Without --root a temporary folder with generated tones is used.
 
 import { spawn } from "node:child_process";
@@ -24,7 +24,8 @@ const rootIndex = args.indexOf("--root");
 const musicRoot = rootIndex >= 0 ? args[rootIndex + 1] : join(LOCAL_ROOT, "fixtures", `bridge-check-run-${process.pid}`);
 const temporary = rootIndex < 0;
 const playlistRoot = join(LOCAL_ROOT, "fixtures", `bridge-playlists-run-${process.pid}`);
-const headlessAudio = process.env.RHINE_VLC_AOUT === "dummy";
+const audioOutput = process.argv.includes("--real-audio") ? process.env.RHINE_VLC_AOUT : "dummy";
+const headlessAudio = audioOutput === "dummy";
 if (headlessAudio) console.log("# dummy audio output: physical volume checks require a real-output run");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const auth = { authorization: `Bearer ${TOKEN}` };
@@ -87,7 +88,7 @@ const bridge = spawn(process.execPath, [
   "--experimental-strip-types", join(ROOT, "scripts", "vlc-bridge.mjs"),
   "--root", musicRoot, "--port", String(PORT), "--token", TOKEN,
   "--no-save-playlist",
-  ...(process.env.RHINE_VLC_AOUT ? ["--aout", process.env.RHINE_VLC_AOUT] : []),
+  ...(audioOutput ? ["--aout", audioOutput] : []),
 ], { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
 let log = "";
 bridge.stdout.on("data", (chunk) => (log += chunk));
@@ -183,6 +184,10 @@ try {
     assert.equal((await request("/api/status")).body.prepared, true, "错误票据不能取消有效准备");
     const again = await request(`/api/prepare?id=${low.id}&client=native-check&sequence=3`);
     assert.equal(again.status, 200);
+    assert.ok(again.body.playbackId);
+    assert.notEqual(prepared.body.playbackId, again.body.playbackId);
+    assert.equal((await request(`/api/seek?seconds=4&playbackId=${prepared.body.playbackId}&client=native-check&sequence=1`)).status, 409);
+    assert.equal((await request(`/api/seek?seconds=0&playbackId=${again.body.playbackId}&client=native-check&sequence=3`)).status, 200);
     assert.equal((await request(`/api/start?ticket=${again.body.ticket}&client=native-check&sequence=4`)).status, 200);
     assert.equal((await request(`/api/start?ticket=${again.body.ticket}&client=native-check&sequence=5`)).status, 409);
     const playing = (await request("/api/status")).body;
@@ -254,7 +259,9 @@ try {
   });
 
   await step("定位与暂停生效", async () => {
-    const seek = await request("/api/seek?seconds=4");
+    const { playbackId } = (await request("/api/status")).body;
+    assert.ok(playbackId);
+    const seek = await request(`/api/seek?seconds=4&playbackId=${playbackId}`);
     assert.equal(seek.status, 200);
     await sleep(1200);
     const seeked = (await request("/api/status")).body;

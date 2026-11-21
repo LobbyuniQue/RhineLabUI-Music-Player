@@ -52,7 +52,7 @@ function mp3Fixture() {
   return {data: num(tag, audio, id3v1), tagBytes: tag.length, audioBytes: audio.length};
 }
 
-function flacFixture() {
+function flacFixture(...extraBlocks) {
   const streamInfo = new Uint8Array(34);
   streamInfo.set(be(4096, 2), 0);
   streamInfo.set(be(4096, 2), 2);
@@ -72,6 +72,7 @@ function flacFixture() {
   return num(
     chars('fLaC'),
     [0x00], be(streamInfo.length, 3), streamInfo, // not last
+    ...extraBlocks,
     [0x84], be(vorbis.length, 3), vorbis, // type 4 + last flag
   );
 }
@@ -152,6 +153,37 @@ assert.equal(flacMeta.year, '2026');
 assert.equal(flacMeta.codec, 'flac');
 assert.ok(Math.abs(flacMeta.duration - 10) < 0.01, `flac duration 10s expected, got ${flacMeta.duration}`);
 console.log(`flac : "${flacMeta.title}" / ${flacMeta.artist} / ${flacMeta.duration}s`);
+
+// A picture straddles the header cache; a comment after a padding block still
+// belongs to the tags. Record the real Blob slice requests made by the parser.
+const flacBlock = (type, body) => num([type], be(body.length, 3), body);
+const coverBytes = new Uint8Array(300 * 1024).fill(0x5a);
+const picture = num(be(3), be(9), chars('image/png'), be(9), chars('Front art'),
+  be(600), be(600), be(24), be(0), be(coverBytes.length), coverBytes);
+const paddingBytes = new Uint8Array(320 * 1024);
+const withArt = flacFixture(flacBlock(6, picture), flacBlock(1, paddingBytes));
+const withAudioTail = new Blob([withArt, new Uint8Array(512 * 1024)]);
+const ranges = [];
+const trackedBlob = {size: withAudioTail.size, slice(start, end) {
+  ranges.push([start, end]);
+  return withAudioTail.slice(start, end);
+}};
+const withArtMeta = await readTrackMeta(trackedBlob, 'album.flac');
+assert.equal(withArtMeta.picture?.mime, 'image/png');
+assert.deepEqual(withArtMeta.picture.data, coverBytes);
+assert.equal(withArtMeta.title, '午夜观测');
+const paddingStart = 4 + 4 + 34 + 4 + picture.length + 4;
+for (const [start, end] of ranges) {
+  assert.ok(end <= paddingStart || start >= paddingStart + paddingBytes.length, 'skip padding payload');
+  assert.ok(end <= withArt.length || start === withAudioTail.size - 128, 'only the existing ID3v1 tail check follows the tags');
+}
+// Partial picture fields should leave the following title readable.
+for (const length of [32, 48, picture.length - 1]) {
+  const partial = await read(flacFixture(flacBlock(6, picture.subarray(0, length))), 'album.flac');
+  assert.equal(partial.picture, null);
+  assert.equal(partial.title, '午夜观测');
+}
+console.log('flac : large cover, bounded reads and partial picture fields passed');
 
 // Extended headers have different length conventions in ID3v2.3 and v2.4.
 for (const version of [3, 4]) {

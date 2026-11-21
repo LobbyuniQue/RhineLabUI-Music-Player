@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { neteasePlaylistMiddleware } from "./scripts/lib/netease-playlist-http.mjs";
+import { createAccountMiddleware } from "./scripts/lib/netease-account-http.mjs";
 
 // Keep Blender's stable source/export paths, while production URLs identify
 // exact bytes and can be cached without revalidation across deployments.
@@ -19,6 +21,14 @@ export default defineConfig(({ mode }) => ({
     __RHINE_NOVECENTO__: JSON.stringify(hasNovecento),
   },
   plugins: [{
+    name: "netease-music",
+    configureServer(server) {
+      server.middlewares.use(neteasePlaylistMiddleware).use(createAccountMiddleware());
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(neteasePlaylistMiddleware).use(createAccountMiddleware());
+    },
+  }, {
     name: "versioned-model-assets", apply: "build",
     buildStart() { for (const model of models) this.emitFile({type:"asset",fileName:model.fileName,source:model.source}); },
   }, ...(mode === "wallpaper" ? [{

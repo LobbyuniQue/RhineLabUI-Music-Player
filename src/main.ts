@@ -704,7 +704,7 @@ function requestLabelCover(recordIndex: number) {
 function setLibraryMode(mode: "archive" | "music") {
   if (prefs.libraryMode === mode) return;
   if (mode === "music" && !musicLibrary.tracks.length) {
-    notify("曲库为空：先在「设置 → 本地音乐」选择目录，或连接 VLC 内核");
+    openModal("music");
     return;
   }
   prefs.libraryMode = mode;
@@ -1493,15 +1493,15 @@ function renderModal() {
     modal === "settings"
       ? "SYSTEM PREFERENCES"
       : modal === "music"
-        ? "LOCAL MUSIC LIBRARY"
+        ? "MUSIC LIBRARY"
         : "ARCHIVE DIRECTORY";
   const modalLabel =
-    modal === "settings" ? "系统设置" : modal === "music" ? "本地音乐" : modal === "saved" ? "收藏档案" : "档案检索";
+    modal === "settings" ? "系统设置" : modal === "music" ? "音乐库" : modal === "saved" ? "收藏档案" : "档案检索";
   const modalBody =
     modal === "settings"
       ? settingsMarkup()
       : modal === "music"
-        ? `<h2>LOCAL MUSIC<small>本地音乐检索与播放</small></h2><div id="music-panel" class="music-panel"></div>`
+        ? `<h2>MUSIC LIBRARY<small>音乐库</small></h2><div id="music-panel" class="music-panel"></div>`
         : `<h2>${modal === "saved" ? "SAVED ARCHIVES" : "ARCHIVE INDEX"}<small>${modal === "saved" ? "收藏档案" : view().kind === "music" ? "音乐库检索" : "内部档案检索"}</small></h2><div class="search-field"><span>⌕</span><input id="archive-search" type="search" autocomplete="off" placeholder="${view().kind === "music" ? "输入曲名、艺术家或专辑" : "输入档案编号、名称或科室"}" aria-label="检索档案"/><span class="key">ESC</span></div>${view().kind === "music" && view().columns.length > 12 ? "" : `<div class="category-filters">${view().categories.map((c, i) => `<button data-filter="${escapeHtml(c)}" class="${i === 0 ? "active" : ""}">${escapeHtml(c)}</button>`).join("")}</div>`}<div class="result-header"><span>${view().kind === "music" ? "TRACK / 曲目" : "FILE / 档案"}</span><span>${view().kind === "music" ? "ARTIST / 艺术家" : "DEPARTMENT / 科室"}</span><span>ACCESS</span></div><div id="search-results" class="search-results"></div><div class="modal-bottom"><span id="result-count"></span><span>INTERNAL DATABASE <i>●</i> CONNECTED</span></div>`;
   $("#modal-root").innerHTML = `<div class="modal-backdrop"><section class="terminal-modal${modal === "settings" ? " settings-modal" : ""}${modal === "music" ? " music-modal" : ""}" role="dialog" aria-modal="true" aria-label="${modalLabel}"><div class="modal-top"><span>RHINE LAB / ${modalTitle}</span><button data-action="close-modal" aria-label="关闭窗口">CLOSE <span>×</span></button></div>${modalBody}</section></div>`;
   const backdrop = $(".modal-backdrop");
@@ -1850,7 +1850,7 @@ document.addEventListener("keydown", (e) => {
   if (modal && e.key === "Tab") {
     const focusables = [
       ...$("#modal-root").querySelectorAll<HTMLElement>(
-        'button,input:not(:disabled),select:not(:disabled),summary,[tabindex="0"]',
+        'button:not(:disabled),input:not(:disabled),select:not(:disabled),a[href],summary,[tabindex="0"]',
       ),
     ];
     const visible = focusables.filter(el => el.getClientRects().length > 0);

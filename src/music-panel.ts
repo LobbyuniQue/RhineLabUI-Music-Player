@@ -5,6 +5,7 @@
 // and hand over the library + player instances.
 
 import { escapeHtml } from "./html";
+import { bindNeteasePlaylist, neteasePlaylistMarkup } from "./netease-playlist-panel.ts";
 import type { Sound } from "./audio";
 import { formatDuration, formatLibrarySize, matchSegments, tokenize, type SearchField } from "./music-search";
 import type { CoverLease, LibraryTrack, MusicLibrary, MusicPlaylist, ScanProgress, ScanReport } from "./music-library";
@@ -434,7 +435,7 @@ export class MusicPanel {
 <div class="category-filters music-filters" role="group" aria-label="检索范围">${FIELD_LABELS.map(
       (item) =>
         `<button data-music-field="${item.field}" class="${item.field === this.field ? "active" : ""}">${item.label}</button>`,
-    ).join("")}<span class="music-tools"><button data-music="pick">${pickerSupported ? "选择目录" : "选择文件"}</button><button data-music="scan" disabled>重新扫描</button></span></div>
+    ).join("")}<span class="music-tools"><button id="netease-open" aria-controls="netease-panel">网易云歌单</button><button data-music="pick">${pickerSupported ? "选择目录" : "选择文件"}</button><button data-music="scan" disabled>重新扫描</button></span></div>
 <div class="music-playlists">
   <label>歌单<select id="music-playlist" aria-label="切换歌单"><option value="">当前目录</option></select></label>
   <label>名称<input id="music-playlist-name" maxlength="80" placeholder="歌单名称" aria-label="歌单名称"/></label>
@@ -467,10 +468,12 @@ export class MusicPanel {
   <label class="music-volume"><span>音量</span><input type="range" id="music-volume" min="0" max="100" step="1" value="80" aria-label="本地音乐音量"/></label>
 </div>
 <div class="modal-bottom"><span id="music-result-count"></span><span id="music-engine-label"></span></div>
-<input type="file" id="music-files" accept="audio/*" multiple hidden/>`;
+<input type="file" id="music-files" accept="audio/*" multiple hidden/>
+${neteasePlaylistMarkup()}`;
   }
 
   private bind(root: HTMLElement, signal: AbortSignal) {
+    bindNeteasePlaylist(root, signal);
     root.querySelector<HTMLSelectElement>("#music-playlist")?.addEventListener("change", (event) => {
       const id = (event.target as HTMLSelectElement).value;
       if (id) void this.activatePlaylist(id).catch(error => this.playbackFailed(error));

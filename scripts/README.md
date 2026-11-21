@@ -12,6 +12,7 @@
 | `npm run build` | 生成网页和 PWA |
 | `npm run preview:dist` | 直接预览 `dist/`，默认端口 4173 |
 | `npm run test:e2e:music` | 浏览器音乐通路验证 |
+| `npm run test:e2e:netease` | 独立静音浏览器与合成网易账号，验证歌单、会员、逐曲音质偏好和注销；先执行 `npm run build` |
 | `npm run test:e2e:vlc` | VLC 与网页集成验证 |
 
 `npm run check` 同时执行播放请求竞态与方向映射、桥接断线/重连、可见封面复用、大分组反查及自有进程清理回归。专项脚本分别为 `check-music-player.mjs`、`check-music-bridge.mjs`、`check-archive-covers.mjs`、`check-owned-process.mjs`。

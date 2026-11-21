@@ -3,6 +3,8 @@ import { createServer } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { join, extname, isAbsolute, relative, resolve } from "node:path";
 import { DIST_DIR } from "../lib/workspace-paths.mjs";
+import { neteasePlaylistMiddleware } from "../lib/netease-playlist-http.mjs";
+import { createAccountMiddleware } from "../lib/netease-account-http.mjs";
 
 if (process.argv.includes("--help")) {
   console.log(
@@ -55,7 +57,7 @@ function fileInside(root, pathname) {
   return file;
 }
 
-createServer(async (req, res) => {
+async function serveStatic(req, res) {
   try {
     let p = decodeURIComponent(new URL(req.url, "http://x").pathname);
     const fixture = p.startsWith("/__fixtures/");
@@ -87,6 +89,14 @@ createServer(async (req, res) => {
   } catch (e) {
     res.writeHead(e instanceof URIError ? 400 : 500).end(String(e));
   }
+}
+
+const account = createAccountMiddleware();
+createServer((req, res) => {
+  neteasePlaylistMiddleware(req, res, (error) => {
+    if (error) return res.writeHead(500).end("Playlist request failed");
+    return account(req, res, () => serveStatic(req, res));
+  });
 }).listen(PORT, "127.0.0.1", () =>
   console.log(`serving ${ROOT} on http://127.0.0.1:${PORT}/`),
 );
